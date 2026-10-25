@@ -85,8 +85,10 @@ type geminiResponse struct {
 		} `json:"content"`
 		Finish string `json:"finishReason"`
 	} `json:"candidates"`
-	Usage          *geminiUsage    `json:"usageMetadata"`
-	PromptFeedback json.RawMessage `json:"promptFeedback"`
+	Usage          *geminiUsage `json:"usageMetadata"`
+	PromptFeedback struct {
+		BlockReason string `json:"blockReason"` // set when the prompt was blocked; no candidates follow
+	} `json:"promptFeedback"`
 }
 
 func gemFinish(s string) string {
@@ -109,6 +111,8 @@ func gemChunk(v geminiResponse) (core.Chunk, error) {
 			c.Text += part.Text
 		}
 		c.FinishReason = gemFinish(v.Candidates[0].Finish)
+	} else if v.PromptFeedback.BlockReason != "" {
+		c.FinishReason = "content_filter"
 	}
 	return c, nil
 }
@@ -121,7 +125,7 @@ func (p *Gemini) Complete(ctx context.Context, model string, req core.ChatReques
 	if err != nil {
 		return core.Completion{}, err
 	}
-	if len(v.Candidates) == 0 {
+	if len(v.Candidates) == 0 && v.PromptFeedback.BlockReason == "" {
 		return core.Completion{}, fmt.Errorf("gemini returned no candidate")
 	}
 	c, err := gemChunk(v)
@@ -142,6 +146,9 @@ type geminiStream struct {
 	body     io.ReadCloser
 	events   *eventReader
 	finished bool
+	// Gemini sends no [DONE]: a finish reason (or a blocked prompt) is the only
+	// sign the answer is complete, so EOF before one is a cut connection.
+	sawFinish bool
 }
 
 func (s *geminiStream) Close() error { return s.body.Close() }
@@ -152,6 +159,9 @@ func (s *geminiStream) Recv() (core.Chunk, error) {
 	for {
 		e, err := s.events.Next()
 		if err == io.EOF {
+			if !s.sawFinish {
+				return core.Chunk{}, io.ErrUnexpectedEOF
+			}
 			s.finished = true
 			return core.Chunk{}, io.EOF
 		}
@@ -165,6 +175,9 @@ func (s *geminiStream) Recv() (core.Chunk, error) {
 		c, err := gemChunk(v)
 		if err != nil {
 			return core.Chunk{}, err
+		}
+		if c.FinishReason != "" {
+			s.sawFinish = true
 		}
 		if c.Text != "" || c.FinishReason != "" || c.Usage != nil {
 			return c, nil

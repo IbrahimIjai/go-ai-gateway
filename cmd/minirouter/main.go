@@ -29,15 +29,15 @@ func main() {
 	models := []core.Model{{ID: "demo/echo", Provider: "demo", Upstream: "echo", Price: &core.Price{}}}
 	// Each configured provider exposes one model. Add more via the model registry.
 	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
-		providers["openai"] = &provider.OpenAI{Key: v}
+		providers["openai"] = &provider.OpenAI{Key: v, Client: provider.NewHTTPClient()}
 		models = append(models, core.Model{ID: "openai/" + env("OPENAI_MODEL", "gpt-4.1-mini"), Upstream: env("OPENAI_MODEL", "gpt-4.1-mini"), Provider: "openai", Price: price("OPENAI")})
 	}
 	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
-		providers["anthropic"] = &provider.Anthropic{Key: v}
+		providers["anthropic"] = &provider.Anthropic{Key: v, Client: provider.NewHTTPClient()}
 		models = append(models, core.Model{ID: "anthropic/" + env("ANTHROPIC_MODEL", "claude-haiku-4-5"), Upstream: env("ANTHROPIC_MODEL", "claude-haiku-4-5"), Provider: "anthropic", Price: price("ANTHROPIC")})
 	}
 	if v := os.Getenv("GEMINI_API_KEY"); v != "" {
-		providers["google"] = &provider.Gemini{Key: v}
+		providers["google"] = &provider.Gemini{Key: v, Client: provider.NewHTTPClient()}
 		models = append(models, core.Model{ID: "google/" + env("GEMINI_MODEL", "gemini-2.5-flash"), Upstream: env("GEMINI_MODEL", "gemini-2.5-flash"), Provider: "google", Price: price("GEMINI")})
 	}
 	app := &api.Server{Router: &router.Router{Models: models, Providers: providers}, Store: billing.NewStore(), Key: key, Log: log}

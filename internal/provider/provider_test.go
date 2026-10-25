@@ -134,3 +134,80 @@ func TestSSEMultilineData(t *testing.T) {
 		t.Fatalf("bad SSE event: %+v %v", e, err)
 	}
 }
+
+// A stream is finished only by its provider's end marker: OpenAI [DONE],
+// Anthropic message_stop, Gemini finishReason. A cut connection must surface
+// as io.ErrUnexpectedEOF, never as a clean io.EOF.
+func TestStreamsRequireEndMarker(t *testing.T) {
+	adapters := []struct {
+		name           string
+		build          func(url string, c *http.Client) Provider
+		clean, cutLate string
+	}{
+		{"openai", func(u string, c *http.Client) Provider { return &OpenAI{Key: "k", BaseURL: u, Client: c} },
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"},
+		{"anthropic", func(u string, c *http.Client) Provider { return &Anthropic{Key: "k", BaseURL: u, Client: c} },
+			"event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\nevent: message_stop\ndata: {}\n\n",
+			"event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"},
+		{"gemini", func(u string, c *http.Client) Provider { return &Gemini{Key: "k", BaseURL: u, Client: c} },
+			"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\ndata: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"STOP\"}]}\n\n",
+			"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n"},
+	}
+	for _, a := range adapters {
+		for _, tc := range []struct {
+			name, body string
+			want       error
+		}{
+			{"clean", a.clean, io.EOF},
+			{"cut after first delta", a.cutLate, io.ErrUnexpectedEOF},
+			{"cut before any event", "", io.ErrUnexpectedEOF},
+		} {
+			t.Run(a.name+"/"+tc.name, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, tc.body) }))
+				defer srv.Close()
+				st, err := a.build(srv.URL, srv.Client()).Stream(context.Background(), "m", testReq())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer st.Close()
+				for err == nil {
+					_, err = st.Recv()
+				}
+				if err != tc.want {
+					t.Fatalf("want %v, got %v", tc.want, err)
+				}
+			})
+		}
+	}
+}
+
+// Gemini answers a blocked prompt with promptFeedback and no candidates. That
+// is a finished response (content_filter), not an error and not a cut stream.
+func TestGeminiBlockedPromptIsContentFilter(t *testing.T) {
+	blocked := `{"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":4}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "streamGenerateContent") {
+			io.WriteString(w, "data: "+blocked+"\n\n")
+			return
+		}
+		io.WriteString(w, blocked)
+	}))
+	defer srv.Close()
+	p := &Gemini{Key: "k", BaseURL: srv.URL, Client: srv.Client()}
+	c, err := p.Complete(context.Background(), "m", testReq())
+	if err != nil || c.FinishReason != "content_filter" || c.Usage == nil {
+		t.Fatalf("non-stream: %+v %v", c, err)
+	}
+	st, err := p.Stream(context.Background(), "m", testReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if chunk, err := st.Recv(); err != nil || chunk.FinishReason != "content_filter" {
+		t.Fatalf("stream: %+v %v", chunk, err)
+	}
+	if _, err := st.Recv(); err != io.EOF {
+		t.Fatalf("want clean EOF after block, got %v", err)
+	}
+}

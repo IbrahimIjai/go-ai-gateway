@@ -231,19 +231,26 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		jsonError(w, http.StatusNotFound, "model_not_found", "requested model is not available")
 		return
 	}
+	class := provider.Class(err)
 	var upstream *provider.APIError
-	if errors.As(err, &upstream) {
-		if upstream.Status == 429 || upstream.Status >= 500 {
-			jsonError(w, http.StatusBadGateway, "upstream_error", "provider unavailable; try again later")
-			return
-		}
+	isUpstream := errors.As(err, &upstream)
+	if !isUpstream && s.Log != nil {
+		s.Log.Error("gateway request failure", "class", class, "error", err)
+	}
+	switch {
+	case class == provider.ClassQuota:
+		jsonError(w, http.StatusBadGateway, "upstream_error", "provider account quota or credit is exhausted; retrying will not help")
+	case class == provider.ClassCredential:
+		jsonError(w, http.StatusBadGateway, "upstream_error", "provider rejected the gateway's credentials")
+	case class == provider.ClassTimeout:
+		jsonError(w, http.StatusGatewayTimeout, "upstream_timeout", "provider timed out")
+	case class == provider.ClassTransient, class == provider.ClassRateLimit:
+		jsonError(w, http.StatusBadGateway, "upstream_error", "provider unavailable; try again later")
+	case isUpstream:
 		jsonError(w, http.StatusBadGateway, "upstream_error", "provider rejected request (HTTP "+fmt.Sprint(upstream.Status)+")")
-		return
+	default:
+		jsonError(w, http.StatusBadGateway, "upstream_error", "provider request failed")
 	}
-	if s.Log != nil {
-		s.Log.Error("gateway request failure", "error", err)
-	}
-	jsonError(w, http.StatusBadGateway, "upstream_error", "provider request failed")
 }
 func fallbackFinish(s string) string {
 	if s == "" {

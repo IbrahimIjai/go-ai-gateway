@@ -3,8 +3,6 @@ package provider
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io"
 
 	"example.com/minirouter/internal/core"
@@ -19,17 +17,6 @@ type Provider interface {
 type Stream interface {
 	Recv() (core.Chunk, error) // returns io.EOF on a completed stream
 	Close() error
-}
-
-type APIError struct {
-	Status  int
-	Message string
-}
-
-func (e *APIError) Error() string { return fmt.Sprintf("upstream HTTP %d: %s", e.Status, e.Message) }
-func Retryable(err error) bool {
-	var e *APIError
-	return errors.As(err, &e) && (e.Status == 429 || e.Status == 408 || e.Status >= 500)
 }
 
 type sliceStream struct {
