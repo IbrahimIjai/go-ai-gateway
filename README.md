@@ -147,6 +147,9 @@ Before committing, `gofmt -l cmd internal` should print nothing and `go vet ./..
 | SSE streaming normalized to Chat Completions chunks | ✅ text and tool-call deltas |
 | Usage metadata normalized and recorded | ✅ when upstream returns usage |
 | `router/auto` fallback before the first byte, on provider-side failures | ✅ |
+| Deployment priority tiers and weights, retries with backoff, Retry-After within a budget | ✅ |
+| Per-deployment circuit breaker, concurrency limit, timed auto-disable on quota/key failures | ✅ |
+| Routing explained: `X-MiniRouter-Route-Reason`, `-Attempts`, `-Deployment` headers, journaled per request | ✅ |
 | Cut or silent upstream streams end with an error, never a false `[DONE]` | ✅ |
 | Query-aware quality/latency model scoring | ☐ future |
 | `response_format` JSON / JSON schema | ✅ OpenAI, Gemini (Anthropic: refused, never dropped) |
@@ -165,7 +168,8 @@ internal/api/                 HTTP handlers, strict input validation, SSE output
 internal/core/                shared request, message, tool, usage and price types
 internal/catalog/             models, deployments, aliases; JSON config and validation
 internal/provider/            upstream adapters and SSE parsing
-internal/router/              model resolution, fallback, stream preflight
+internal/router/              resolution, attempt planning, retries, stream preflight
+internal/health/              circuit breakers, auto-disable, concurrency limits, latency samples
 internal/billing/             microUSD cost calculation, demo usage journal
 examples/                     request JSON
 config/                      example catalog

@@ -99,3 +99,19 @@ func TestUpstreamFailuresMapToHonestErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestDecisionHeadersOnFailure(t *testing.T) {
+	s := serverWith(scripted{err: &provider.APIError{Status: 400}})
+	rec := testPost(t, s, `{"model":"scripted/model","messages":[{"role":"user","content":"hi"}]}`, "Bearer local-test-key")
+	if rec.Header().Get("X-MiniRouter-Attempts") != "1" || !strings.Contains(rec.Header().Get("X-MiniRouter-Route-Reason"), "stop_caller_fault") {
+		t.Fatalf("failures must be explained too: %v", rec.Header())
+	}
+	if s.Store.Summary().Requests != 0 {
+		t.Fatal("a failed request is not journaled as usage")
+	}
+	ok := makeTestServer()
+	testPost(t, ok, `{"model":"demo/echo","messages":[{"role":"user","content":"hi"}]}`, "Bearer local-test-key")
+	if r := ok.Store.Summary().Recent[0]; r.Route == nil || r.Route.Deployment != "demo/echo" || r.Deployment != "demo/echo" {
+		t.Fatalf("the journal keeps the route: %+v", r)
+	}
+}

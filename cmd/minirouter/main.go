@@ -13,6 +13,7 @@ import (
 	"example.com/minirouter/internal/api"
 	"example.com/minirouter/internal/billing"
 	"example.com/minirouter/internal/catalog"
+	"example.com/minirouter/internal/health"
 	"example.com/minirouter/internal/router"
 )
 
@@ -54,7 +55,7 @@ func main() {
 	if err != nil || firstEvent < 0 {
 		fail("MINIROUTER_FIRST_EVENT_TIMEOUT must be a duration such as 20s")
 	}
-	rt := &router.Router{Catalog: catalog.NewRegistry(snap), Providers: providers, FirstEventTimeout: firstEvent}
+	rt := &router.Router{Catalog: catalog.NewRegistry(snap), Providers: providers, Health: health.New(health.Defaults, nil), FirstEventTimeout: firstEvent}
 	app := &api.Server{Router: rt, Store: billing.NewStore(), Key: key, Log: log}
 	addr := env("MINIROUTER_ADDR", "127.0.0.1:8080")
 	server := &http.Server{Addr: addr, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second}
