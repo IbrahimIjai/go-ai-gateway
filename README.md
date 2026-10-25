@@ -7,7 +7,7 @@
 - **Configure models and providers:** [example catalog](config/minirouter.example.json), explained in [Catalog file](#catalog-file).
 - **Inspect the future contract/schema:** [OpenAPI design](contracts/openapi.yaml) and [PostgreSQL migrations](db/migrations/).
 
-**Important:** `db/` and `contracts/` are **design artifacts**, not currently connected to the running app.
+**Important:** `contracts/` and `db/design/` are **design artifacts**; `db/migrations/` is applied automatically in PostgreSQL mode.
 
 **Runnable starter / learning project.** An OpenAI-compatible Chat Completions API (text and tool calling) backed by a real provider abstraction, normal and SSE-streaming adapters for OpenAI, Anthropic and Gemini, a basic fallback router and an in-memory usage journal.
 
@@ -116,6 +116,27 @@ Startup validation reports every problem at once, and unknown fields are errors.
 go run ./cmd/catalog-import -prices model_prices_and_context_window.json gpt-4.1-mini claude-haiku-4-5
 ```
 
+## PostgreSQL mode: projects, keys, limits
+
+With a database, MiniRouter issues per-project API keys, enforces per-key limits and keeps a durable record of every request (never prompts or outputs). Migrations run at startup.
+
+```bash
+export MINIROUTER_DATABASE_URL='postgres://user:pass@localhost:5432/minirouter'
+export MINIROUTER_ADMIN_KEY='a-long-random-admin-secret'      # ≥ 24 chars, admin API only
+export MINIROUTER_KEY_PEPPER='another-long-random-secret-value' # ≥ 32 chars, keep it stable
+go run ./cmd/minirouter
+
+A="Authorization: Bearer $MINIROUTER_ADMIN_KEY"
+curl -s -X POST localhost:8080/admin/v1/projects -H "$A" -d '{"organization":"acme","name":"web"}'
+curl -s -X POST localhost:8080/admin/v1/keys -H "$A" \
+  -d '{"project_id":"<id>","name":"ci","rpm":60,"tpm":100000,"concurrency":4,"models":["router/auto"]}'
+```
+
+- The key's secret is returned once; only a prefix and an HMAC digest are stored.
+- Limits answer `429` with `Retry-After`; a model outside the key's allowlist answers `403`.
+- Admin routes: `POST /admin/v1/projects`, `POST|GET /admin/v1/keys`, `DELETE /admin/v1/keys/{id}`, `GET /admin/v1/usage?project_id=&from=&to=`, `GET /admin/v1/requests/{id}`, `GET /admin/v1/deployments`, `POST /admin/v1/deployments/{id}/enable`. An inference key never opens them.
+- Without `MINIROUTER_DATABASE_URL`, the single `MINIROUTER_API_KEY` mode works as before.
+
 ## Development commands
 
 Run these from the repository root. The Go toolchain is the build system; there is no Makefile.
@@ -130,6 +151,10 @@ go test -race ./...                          # tests with the race detector
 go vet ./...                                 # static checks
 gofmt -l cmd internal                        # list unformatted files; no output means clean
 gofmt -w cmd internal                        # format in place
+
+# Store tests need a disposable PostgreSQL; without the variable they skip.
+docker run -d --rm --name mr-pg -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:16-alpine
+MINIROUTER_TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/postgres?sslmode=disable' go test ./internal/store
 ```
 
 Before committing, `gofmt -l cmd internal` should print nothing and `go vet ./...` and `go test -race ./...` should pass.
@@ -156,7 +181,8 @@ Before committing, `gofmt -l cmd internal` should print nothing and `go vet ./..
 | `response_format` JSON / JSON schema | ✅ OpenAI, Gemini (Anthropic: refused, never dropped) |
 | Images / audio | ☐ future |
 | Catalog: models vs deployments, JSON config, OpenAI-compatible hosts | ✅ |
-| Persistent DB ledger / balances / multi-tenant keys | ☐ future |
+| PostgreSQL: projects, hashed per-project keys, per-key limits, durable request records, admin API | ✅ |
+| Credit ledger / balances / holds | ☐ future |
 | Credit reservation/settlement/reconciliation | ☐ future |
 | MCP / x402 / agent payment | ☐ optional future |
 
@@ -170,12 +196,15 @@ internal/core/                shared request, message, tool, usage and price typ
 internal/catalog/             models, deployments, aliases; JSON config and validation
 internal/provider/            upstream adapters and SSE parsing
 internal/router/              resolution, attempt planning, retries, stream preflight
+internal/limits/              per-key RPM, TPM and concurrency limits
+internal/store/               PostgreSQL: projects, keys, request records
 internal/health/              circuit breakers, auto-disable, concurrency limits, latency samples
 internal/billing/             microUSD cost calculation, demo usage journal
 examples/                     request JSON
 config/                      example catalog
 contracts/                   target OpenAPI (not wired in)
-db/migrations/               planned PostgreSQL tables (not applied)
+db/migrations/               PostgreSQL schema, applied at startup
+db/design/                   ledger schema planned for credits (not applied)
 ```
 
 Request path:

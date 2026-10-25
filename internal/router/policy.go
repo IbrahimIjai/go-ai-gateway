@@ -22,9 +22,9 @@ func (e *NoEligibleError) Error() string {
 	return "no model behind " + e.Requested + " can serve this request: " + strings.Join(e.Why, "; ")
 }
 
-// estimateInput is a rough input token count for routing, not billing:
+// EstimateInput is a rough input token count for routing, not billing:
 // about four bytes per token plus a little per message and tool.
-func estimateInput(req core.ChatRequest) int {
+func EstimateInput(req core.ChatRequest) int {
 	n := 0
 	for _, m := range req.Messages {
 		n += 8 + len(m.Text())/4

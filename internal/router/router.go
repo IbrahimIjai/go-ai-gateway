@@ -181,7 +181,7 @@ func (r *Router) shuffle(tier []Candidate) {
 // route gates every model, ranks the survivors by the alias policy, then
 // orders each model's deployments.
 func (r *Router) route(req core.ChatRequest, policy string, cands []Candidate, d *core.RouteDecision) ([]Candidate, error) {
-	input := estimateInput(req)
+	input := EstimateInput(req)
 	var eligible [][]Candidate
 	var why []string
 	for _, g := range groups(cands) {
@@ -414,3 +414,6 @@ func Headers(d core.RouteDecision) map[string]string {
 	h["X-MiniRouter-Route-Reason"] = strings.Join(reasons, ",")
 	return h
 }
+
+// Tracker returns the health tracker, creating the default one if unset.
+func (r *Router) Tracker() *health.Tracker { return r.tracker() }

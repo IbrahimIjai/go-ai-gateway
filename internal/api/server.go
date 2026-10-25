@@ -3,7 +3,6 @@ package api
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,21 +10,26 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"example.com/minirouter/internal/billing"
 	"example.com/minirouter/internal/catalog"
 	"example.com/minirouter/internal/core"
+	"example.com/minirouter/internal/limits"
 	"example.com/minirouter/internal/provider"
 	"example.com/minirouter/internal/router"
 )
 
 type Server struct {
 	Router *router.Router
-	Store  *billing.Store
-	Key    string
+	Store  *billing.Store // in-memory journal behind /v1/usage
+	Key    string         // the single static key, when Keys is nil
 	Log    *slog.Logger
+	// Optional, with PostgreSQL: per-project keys, durable records, limits.
+	Keys    Keys
+	Records Recorder
+	Limiter *limits.Limiter
+	Admin   *Admin // nil: no admin API
 }
 
 func (s *Server) Handler() http.Handler {
@@ -37,18 +41,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/usage", s.auth(s.usage))
 	mux.HandleFunc("POST /v1/chat/completions", s.auth(s.chat))
 	mux.HandleFunc("POST /v1/route/explain", s.auth(s.explain))
-	return mux
-}
-func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// The scheme is case-insensitive (RFC 7235); a bare key is not a bearer token.
-		scheme, supplied, _ := strings.Cut(r.Header.Get("Authorization"), " ")
-		if !strings.EqualFold(scheme, "Bearer") || subtle.ConstantTimeCompare([]byte(supplied), []byte(s.Key)) != 1 {
-			jsonError(w, http.StatusUnauthorized, "invalid_api_key", "Missing or invalid bearer key")
-			return
-		}
-		next(w, r)
+	if s.Admin != nil && s.Admin.Key != "" {
+		s.Admin.mount(mux, s)
 	}
+	return mux
 }
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	snap := s.Router.Catalog.Load()
@@ -136,33 +132,46 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	grant, ok := s.admit(w, r, req)
+	if !ok {
+		return
+	}
 	id := newID()
 	now := time.Now().Unix()
 	if req.Stream {
-		s.stream(w, r, req, id, now)
+		s.stream(w, r, req, id, now, grant)
 		return
 	}
 	c, out, route, err := s.Router.Complete(r.Context(), req)
 	routeHeaders(w, c, route)
+	settle(grant, out.Usage)
+	s.finish(r, id, req, c, route, out.Usage, false, err)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	s.record(id, c, route, out.Usage, false)
 	jsonOut(w, http.StatusOK, map[string]any{
 		"id": id, "object": "chat.completion", "created": now, "model": c.Model.ID,
 		"choices": []any{map[string]any{"index": 0, "message": wireMessage(out), "finish_reason": fallbackFinish(out.FinishReason)}},
 		"usage":   wireUsage(out.Usage),
 	})
 }
-func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatRequest, id string, now int64) {
+func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatRequest, id string, now int64, grant *limits.Grant) {
 	c, stream, route, err := s.Router.Stream(r.Context(), req)
 	routeHeaders(w, c, route)
 	if err != nil {
+		settle(grant, nil)
+		s.finish(r, id, req, c, route, nil, false, err)
 		s.fail(w, err)
 		return
 	}
 	defer stream.Close()
+	settled := false
+	defer func() {
+		if !settled {
+			settle(grant, nil) // every early return still frees the key's slot
+		}
+	}()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -217,7 +226,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatReq
 			}
 		}
 	}
-	s.record(id, c, route, usage, failed)
+	settle(grant, usage)
+	settled = true
+	s.finish(r, id, req, c, route, usage, failed, nil)
 	if failed {
 		return
 	}
@@ -268,14 +279,16 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 	}
 }
 
-// record journals one served request. A cut stream or missing usage is
-// recorded as unavailable, never as zero.
-func (s *Server) record(id string, c router.Candidate, route core.RouteDecision, usage *core.Usage, failed bool) {
-	r := core.UsageRecord{ID: id, Model: c.Model.ID, Provider: c.Deployment.Provider, Deployment: c.Deployment.ID, Status: "ok", Usage: usage, Route: &route}
-	if failed || usage == nil {
-		r.Status, r.Usage = "usage_unavailable", nil
+// settle corrects the limiter's token estimate with actual usage.
+func settle(g *limits.Grant, u *core.Usage) {
+	if g == nil {
+		return
 	}
-	s.Store.Add(r, c.Price)
+	if u != nil {
+		g.Settle(u.TotalTokens, true)
+	} else {
+		g.Settle(0, false)
+	}
 }
 
 // routeHeaders explains the routing, on failures too.
