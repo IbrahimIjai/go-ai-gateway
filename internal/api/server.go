@@ -39,8 +39,9 @@ func (s *Server) Handler() http.Handler {
 }
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		supplied := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if len(supplied) != len(s.Key) || subtle.ConstantTimeCompare([]byte(supplied), []byte(s.Key)) != 1 {
+		// The scheme is case-insensitive (RFC 7235); a bare key is not a bearer token.
+		scheme, supplied, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+		if !strings.EqualFold(scheme, "Bearer") || subtle.ConstantTimeCompare([]byte(supplied), []byte(s.Key)) != 1 {
 			jsonError(w, http.StatusUnauthorized, "invalid_api_key", "Missing or invalid bearer key")
 			return
 		}

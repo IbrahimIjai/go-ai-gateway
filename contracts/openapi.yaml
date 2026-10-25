@@ -97,6 +97,7 @@ paths:
         '402': {description: Insufficient funds (planned)}
         '429': {description: Rate limit exceeded (planned)}
         '502': {description: Upstream provider error}
+        '504': {description: Upstream provider timed out}
   /admin/v1/billing/balance:
     get:
       summary: Customer available/reserved balance (planned admin auth)

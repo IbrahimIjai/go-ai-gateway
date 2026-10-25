@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	"example.com/minirouter/internal/core"
 	"example.com/minirouter/internal/provider"
@@ -93,5 +94,58 @@ func TestAutoFallbackFollowsFailureClass(t *testing.T) {
 		if got := err == nil; got != tc.fallback {
 			t.Errorf("%s (stream): want fallback=%v, got err %v", tc.name, tc.fallback, err)
 		}
+	}
+}
+
+// slow streams after delay, or fails when its request context ends first.
+type slow struct{ delay time.Duration }
+
+func (slow) Name() string { return "slow" }
+func (slow) Complete(context.Context, string, core.ChatRequest) (core.Completion, error) {
+	return core.Completion{}, errors.New("unused")
+}
+func (p slow) Stream(ctx context.Context, _ string, _ core.ChatRequest) (provider.Stream, error) {
+	return slowStream{ctx: ctx, delay: p.delay}, nil
+}
+
+type slowStream struct {
+	ctx   context.Context
+	delay time.Duration
+}
+
+func (s slowStream) Recv() (core.Chunk, error) {
+	select {
+	case <-time.After(s.delay):
+		return core.Chunk{Text: "late"}, nil
+	case <-s.ctx.Done():
+		return core.Chunk{}, s.ctx.Err()
+	}
+}
+func (slowStream) Close() error { return nil }
+
+func TestFirstEventTimeoutHandsOverToNextCandidate(t *testing.T) {
+	r := &Router{FirstEventTimeout: 20 * time.Millisecond,
+		Models:    []core.Model{{ID: "a", Provider: "a"}, {ID: "b", Provider: "b"}},
+		Providers: map[string]provider.Provider{"a": slow{delay: time.Hour}, "b": fake{name: "b"}}}
+	m, st, err := r.Stream(context.Background(), core.ChatRequest{Model: "router/auto"})
+	if err != nil || m.ID != "b" {
+		t.Fatalf("want fallback to b, got %q %v", m.ID, err)
+	}
+	st.Close()
+}
+
+// The deadline only exists to hand over to a fallback, so the last candidate
+// never gets it: a slow answer beats no answer.
+func TestLastCandidateIsNeverCutByFirstEventTimeout(t *testing.T) {
+	r := &Router{FirstEventTimeout: 5 * time.Millisecond,
+		Models:    []core.Model{{ID: "a", Provider: "a"}},
+		Providers: map[string]provider.Provider{"a": slow{delay: 50 * time.Millisecond}}}
+	m, st, err := r.Stream(context.Background(), core.ChatRequest{Model: "a"})
+	if err != nil || m.ID != "a" {
+		t.Fatalf("want a, got %q %v", m.ID, err)
+	}
+	defer st.Close()
+	if c, err := st.Recv(); err != nil || c.Text != "late" {
+		t.Fatalf("want the late chunk, got %+v %v", c, err)
 	}
 }

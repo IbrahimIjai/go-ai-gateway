@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"example.com/minirouter/internal/core"
 	"example.com/minirouter/internal/provider"
@@ -18,6 +19,10 @@ var ErrUnknownModel = errors.New("unknown or unavailable model")
 type Router struct {
 	Models    []core.Model
 	Providers map[string]provider.Provider
+	// FirstEventTimeout bounds the wait for a stream's first event on every
+	// attempt that still has a fallback behind it. The last attempt always
+	// waits, so a slow answer beats no answer (Bifrost's rule). Zero disables.
+	FirstEventTimeout time.Duration
 }
 
 func (r *Router) List() []core.Model {
@@ -91,8 +96,8 @@ func (r *Router) Complete(ctx context.Context, req core.ChatRequest) (core.Model
 }
 
 // Stream peeks at the first upstream chunk before committing a downstream SSE
-// response. If the HTTP request fails with a retryable status, fallback is
-// possible. NEVER retry after streaming starts: that could splice responses.
+// response. Until then a retryable failure may fall back to the next
+// candidate. NEVER retry after streaming starts: that could splice responses.
 func (r *Router) Stream(ctx context.Context, req core.ChatRequest) (core.Model, provider.Stream, error) {
 	candidates, err := r.Candidates(req.Model)
 	if err != nil {
@@ -103,28 +108,57 @@ func (r *Router) Stream(ctx context.Context, req core.ChatRequest) (core.Model, 
 		if p == nil {
 			return core.Model{}, nil, fmt.Errorf("provider not configured: %s", m.Provider)
 		}
-		stream, callErr := p.Stream(ctx, m.Upstream, req)
+		last := i == len(candidates)-1
+		stream, callErr := r.open(ctx, p, m, req, !last)
 		if callErr == nil {
-			first, readErr := stream.Recv()
-			if readErr == nil {
-				return m, &peekStream{Stream: stream, first: &first}, nil
-			}
-			stream.Close()
-			if readErr == io.EOF {
-				return core.Model{}, nil, fmt.Errorf("upstream stream ended without content")
-			}
-			callErr = readErr
+			return m, stream, nil
 		}
-		if i == len(candidates)-1 || !provider.Retryable(callErr) {
+		if last || !provider.Retryable(callErr) {
 			return core.Model{}, nil, callErr
 		}
 	}
 	return core.Model{}, nil, ErrUnknownModel
 }
 
+// open starts one streaming attempt and peeks at its first chunk. A bounded
+// attempt is abandoned when that chunk takes longer than FirstEventTimeout.
+func (r *Router) open(ctx context.Context, p provider.Provider, m core.Model, req core.ChatRequest, bounded bool) (provider.Stream, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	var deadline *time.Timer
+	if bounded && r.FirstEventTimeout > 0 {
+		deadline = time.AfterFunc(r.FirstEventTimeout, cancel)
+	}
+	stream, err := p.Stream(ctx, m.Upstream, req)
+	var first core.Chunk
+	if err == nil {
+		if first, err = stream.Recv(); err == io.EOF {
+			err = fmt.Errorf("upstream stream ended without content")
+		}
+	}
+	if deadline != nil && !deadline.Stop() {
+		// Fired: even a chunk that just arrived rides a cancelled request.
+		err = fmt.Errorf("no stream event within %s: %w", r.FirstEventTimeout, context.DeadlineExceeded)
+	}
+	if err != nil {
+		if stream != nil {
+			stream.Close()
+		}
+		cancel()
+		return nil, err
+	}
+	return &peekStream{Stream: stream, first: &first, cancel: cancel}, nil
+}
+
 type peekStream struct {
 	provider.Stream
-	first *core.Chunk
+	first  *core.Chunk
+	cancel context.CancelFunc
+}
+
+func (s *peekStream) Close() error {
+	err := s.Stream.Close()
+	s.cancel()
+	return err
 }
 
 func (s *peekStream) Recv() (core.Chunk, error) {

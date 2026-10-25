@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"example.com/minirouter/internal/core"
 )
@@ -14,6 +15,9 @@ import (
 type Anthropic struct {
 	Key, BaseURL string
 	Client       *http.Client
+	// StreamIdleTimeout cuts a stream off after this long without upstream
+	// bytes; zero means 120 s.
+	StreamIdleTimeout time.Duration
 }
 
 func (p *Anthropic) Name() string { return "anthropic" }
@@ -107,11 +111,13 @@ func (p *Anthropic) Complete(ctx context.Context, model string, req core.ChatReq
 	return core.Completion{Text: text.String(), FinishReason: anthroFinish(raw.StopReason), Usage: raw.Usage.core()}, nil
 }
 func (p *Anthropic) Stream(ctx context.Context, model string, req core.ChatRequest) (Stream, error) {
-	resp, err := p.send(ctx, model, req, true)
+	body, err := openStream(ctx, p.StreamIdleTimeout, func(ctx context.Context) (*http.Response, error) {
+		return p.send(ctx, model, req, true)
+	})
 	if err != nil {
 		return nil, err
 	}
-	return &anthroStream{body: resp.Body, events: newEventReader(resp.Body)}, nil
+	return &anthroStream{body: body, events: newEventReader(body)}, nil
 }
 
 type anthroStream struct {

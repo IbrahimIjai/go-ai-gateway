@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"example.com/minirouter/internal/core"
 )
@@ -14,6 +15,9 @@ import (
 type OpenAI struct {
 	Key, BaseURL string
 	Client       *http.Client
+	// StreamIdleTimeout cuts a stream off after this long without upstream
+	// bytes; zero means 120 s.
+	StreamIdleTimeout time.Duration
 }
 
 func (p *OpenAI) Name() string { return "openai" }
@@ -83,11 +87,13 @@ func (p *OpenAI) Complete(ctx context.Context, model string, req core.ChatReques
 	return core.Completion{Text: raw.Choices[0].Message.Content, FinishReason: raw.Choices[0].FinishReason, Usage: fromOpenAIUsage(&raw)}, nil
 }
 func (p *OpenAI) Stream(ctx context.Context, model string, req core.ChatRequest) (Stream, error) {
-	resp, err := p.send(ctx, model, req, true)
+	body, err := openStream(ctx, p.StreamIdleTimeout, func(ctx context.Context) (*http.Response, error) {
+		return p.send(ctx, model, req, true)
+	})
 	if err != nil {
 		return nil, err
 	}
-	return &openAIStream{body: resp.Body, events: newEventReader(resp.Body)}, nil
+	return &openAIStream{body: body, events: newEventReader(body)}, nil
 }
 
 type openAIStream struct {

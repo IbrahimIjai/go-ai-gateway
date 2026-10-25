@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -80,3 +81,60 @@ func readJSON[T any](resp *http.Response) (T, error) {
 	return out, err
 }
 func endpoint(base, path string) string { return strings.TrimRight(base, "/") + path }
+
+// defaultStreamIdle is how long a stream may go without upstream bytes.
+const defaultStreamIdle = 120 * time.Second
+
+var errStreamIdle = fmt.Errorf("upstream stream idle: %w", context.DeadlineExceeded)
+
+// openStream runs send under its own cancellable context and wraps the body so
+// a silent upstream is cut off after idle (zero means defaultStreamIdle).
+func openStream(ctx context.Context, idle time.Duration, send func(context.Context) (*http.Response, error)) (io.ReadCloser, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	resp, err := send(ctx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if idle <= 0 {
+		idle = defaultStreamIdle
+	}
+	return newIdleReader(resp.Body, idle, cancel), nil
+}
+
+// idleReader cancels its request when no bytes arrive for timeout. Cancelling
+// the request context is what makes net/http abort a Read blocked on a silent
+// connection; closing the body from another goroutine would wait for it.
+type idleReader struct {
+	body    io.ReadCloser
+	timeout time.Duration
+	timer   *time.Timer
+	fired   atomic.Bool
+	cancel  context.CancelFunc
+}
+
+func newIdleReader(body io.ReadCloser, timeout time.Duration, cancel context.CancelFunc) *idleReader {
+	r := &idleReader{body: body, timeout: timeout, cancel: cancel}
+	r.timer = time.AfterFunc(timeout, func() {
+		r.fired.Store(true)
+		cancel()
+	})
+	return r
+}
+
+func (r *idleReader) Read(p []byte) (int, error) {
+	n, err := r.body.Read(p)
+	if err != nil && r.fired.Load() {
+		return n, errStreamIdle
+	}
+	if n > 0 {
+		r.timer.Reset(r.timeout)
+	}
+	return n, err
+}
+
+func (r *idleReader) Close() error {
+	r.timer.Stop()
+	r.cancel()
+	return r.body.Close()
+}

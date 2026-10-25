@@ -40,7 +40,14 @@ func main() {
 		providers["google"] = &provider.Gemini{Key: v, Client: provider.NewHTTPClient()}
 		models = append(models, core.Model{ID: "google/" + env("GEMINI_MODEL", "gemini-2.5-flash"), Upstream: env("GEMINI_MODEL", "gemini-2.5-flash"), Provider: "google", Price: price("GEMINI")})
 	}
-	app := &api.Server{Router: &router.Router{Models: models, Providers: providers}, Store: billing.NewStore(), Key: key, Log: log}
+	// Off unless set: reasoning models can legitimately think for minutes
+	// before their first token.
+	firstEvent, err := time.ParseDuration(env("MINIROUTER_FIRST_EVENT_TIMEOUT", "0s"))
+	if err != nil || firstEvent < 0 {
+		log.Error("MINIROUTER_FIRST_EVENT_TIMEOUT must be a duration such as 20s")
+		os.Exit(1)
+	}
+	app := &api.Server{Router: &router.Router{Models: models, Providers: providers, FirstEventTimeout: firstEvent}, Store: billing.NewStore(), Key: key, Log: log}
 	addr := env("MINIROUTER_ADDR", "127.0.0.1:8080")
 	server := &http.Server{Addr: addr, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

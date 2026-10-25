@@ -57,3 +57,23 @@ func TestAPIRejectsUnknownFeaturesAndBadAuth(t *testing.T) {
 		t.Fatalf("missing model should be 404: %d", rec.Code)
 	}
 }
+func TestBearerSchemeIsRequired(t *testing.T) {
+	s := makeTestServer()
+	body := `{"model":"demo/echo","messages":[{"role":"user","content":"hi"}]}`
+	cases := []struct {
+		header string
+		want   int
+	}{
+		{"Bearer local-test-key", 200},
+		{"bearer local-test-key", 200}, // the scheme is case-insensitive (RFC 7235)
+		{"local-test-key", 401},
+		{"Basic local-test-key", 401},
+		{"Bearer ", 401},
+		{"Bearer local-test-key-extra", 401},
+	}
+	for _, tc := range cases {
+		if rec := testPost(t, s, body, tc.header); rec.Code != tc.want {
+			t.Errorf("%q: want %d, got %d", tc.header, tc.want, rec.Code)
+		}
+	}
+}

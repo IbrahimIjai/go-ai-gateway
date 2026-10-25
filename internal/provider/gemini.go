@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"example.com/minirouter/internal/core"
 )
@@ -15,6 +16,9 @@ import (
 type Gemini struct {
 	Key, BaseURL string
 	Client       *http.Client
+	// StreamIdleTimeout cuts a stream off after this long without upstream
+	// bytes; zero means 120 s.
+	StreamIdleTimeout time.Duration
 }
 
 func (p *Gemini) Name() string { return "google" }
@@ -135,11 +139,13 @@ func (p *Gemini) Complete(ctx context.Context, model string, req core.ChatReques
 	return core.Completion{Text: c.Text, FinishReason: c.FinishReason, Usage: c.Usage}, nil
 }
 func (p *Gemini) Stream(ctx context.Context, model string, req core.ChatRequest) (Stream, error) {
-	resp, err := p.send(ctx, model, req, true)
+	body, err := openStream(ctx, p.StreamIdleTimeout, func(ctx context.Context) (*http.Response, error) {
+		return p.send(ctx, model, req, true)
+	})
 	if err != nil {
 		return nil, err
 	}
-	return &geminiStream{body: resp.Body, events: newEventReader(resp.Body)}, nil
+	return &geminiStream{body: body, events: newEventReader(body)}, nil
 }
 
 type geminiStream struct {
