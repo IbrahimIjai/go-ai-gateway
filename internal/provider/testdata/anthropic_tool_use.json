@@ -1,0 +1,6 @@
+{"id":"msg_01","type":"message","role":"assistant","model":"m",
+ "content":[{"type":"text","text":"Checking."},
+   {"type":"tool_use","id":"toolu_a","name":"get_weather","input":{"city":"Paris"}},
+   {"type":"tool_use","id":"toolu_b","name":"get_time","input":{}}],
+ "stop_reason":"tool_use","stop_sequence":null,
+ "usage":{"input_tokens":50,"output_tokens":40,"cache_creation_input_tokens":0,"cache_read_input_tokens":30}}

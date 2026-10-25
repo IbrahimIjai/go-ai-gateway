@@ -1,0 +1,5 @@
+{"candidates":[{"content":{"role":"model","parts":[
+   {"text":"Checking."},
+   {"functionCall":{"name":"get_weather","args":{"city":"Paris"}},"thoughtSignature":"c2lnbmF0dXJlLWE="},
+   {"functionCall":{"name":"get_weather","args":{"city":"Rome"}}}]},"finishReason":"STOP","index":0}],
+ "usageMetadata":{"promptTokenCount":60,"candidatesTokenCount":20,"thoughtsTokenCount":10,"totalTokenCount":90}}

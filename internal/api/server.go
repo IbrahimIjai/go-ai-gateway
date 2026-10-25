@@ -1,4 +1,4 @@
-// Package api provides the text-only OpenAI-compatible HTTP surface.
+// Package api provides the OpenAI-compatible HTTP surface.
 package api
 
 import (
@@ -67,48 +67,12 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, s.Store.Summary())
 }
-func validate(req core.ChatRequest) error {
-	if req.Model == "" {
-		return errors.New("model is required")
-	}
-	if len(req.Messages) == 0 || len(req.Messages) > 100 {
-		return errors.New("messages must contain 1–100 entries")
-	}
-	if req.MaxCompletionTokens != nil && req.MaxTokens != nil {
-		return errors.New("use only one of max_tokens and max_completion_tokens")
-	}
-	if limit := req.TokenLimit(); limit < 1 || limit > 8192 {
-		return errors.New("max output tokens must be between 1 and 8192")
-	}
-	if req.Temperature != nil && (*req.Temperature < 0 || *req.Temperature > 2) {
-		return errors.New("temperature must be between 0 and 2")
-	}
-	if req.StreamOptions != nil && !req.Stream {
-		return errors.New("stream_options requires stream=true")
-	}
-	hasUser := false
-	for _, m := range req.Messages {
-		if m.Role != "user" && m.Role != "assistant" && m.Role != "system" && m.Role != "developer" {
-			return fmt.Errorf("unsupported role: %q", m.Role)
-		}
-		if m.Role == "user" {
-			hasUser = true
-		}
-		if len(m.Content) > 100_000 {
-			return errors.New("message content exceeds 100KB")
-		}
-	}
-	if !hasUser {
-		return errors.New("at least one user message is required")
-	}
-	return nil
-}
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	var req core.ChatRequest
-	if err := dec.Decode(&req); err != nil {
+	var wire chatRequest
+	if err := dec.Decode(&wire); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON or unsupported field: "+err.Error())
 		return
 	}
@@ -117,7 +81,8 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "invalid_request_error", "send exactly one JSON object")
 		return
 	}
-	if err := validate(req); err != nil {
+	req, err := wire.toCore()
+	if err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
@@ -141,8 +106,8 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-MiniRouter-Resolved-Model", m.ID)
 	jsonOut(w, http.StatusOK, map[string]any{
 		"id": id, "object": "chat.completion", "created": now, "model": m.ID,
-		"choices": []any{map[string]any{"index": 0, "message": core.Message{Role: "assistant", Content: out.Text}, "finish_reason": fallbackFinish(out.FinishReason)}},
-		"usage":   out.Usage,
+		"choices": []any{map[string]any{"index": 0, "message": wireMessage(out), "finish_reason": fallbackFinish(out.FinishReason)}},
+		"usage":   wireUsage(out.Usage),
 	})
 }
 func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatRequest, id string, now int64) {
@@ -163,7 +128,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatReq
 		return
 	}
 	write := func(choices []any, usage *core.Usage) error {
-		raw, err := json.Marshal(map[string]any{"id": id, "object": "chat.completion.chunk", "created": now, "model": m.ID, "choices": choices, "usage": usage})
+		raw, err := json.Marshal(map[string]any{"id": id, "object": "chat.completion.chunk", "created": now, "model": m.ID, "choices": choices, "usage": wireUsage(usage)})
 		if err != nil {
 			return err
 		}
@@ -201,8 +166,8 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatReq
 		if c.FinishReason != "" {
 			finish = c.FinishReason
 		}
-		if c.Text != "" {
-			if err := write([]any{map[string]any{"index": 0, "delta": map[string]string{"content": c.Text}, "finish_reason": nil}}, nil); err != nil {
+		if delta := wireDelta(c); delta != nil {
+			if err := write([]any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}}, nil); err != nil {
 				failed = true
 				break
 			}
@@ -219,7 +184,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatReq
 	if err := write([]any{map[string]any{"index": 0, "delta": map[string]string{}, "finish_reason": fallbackFinish(finish)}}, nil); err != nil {
 		return
 	}
-	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+	if req.IncludeUsage {
 		if err := write([]any{}, usage); err != nil {
 			return
 		}
@@ -239,6 +204,8 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		s.Log.Error("gateway request failure", "class", class, "error", err)
 	}
 	switch {
+	case class == provider.ClassUnsupported:
+		jsonError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 	case class == provider.ClassQuota:
 		jsonError(w, http.StatusBadGateway, "upstream_error", "provider account quota or credit is exhausted; retrying will not help")
 	case class == provider.ClassCredential:

@@ -13,7 +13,7 @@ import (
 )
 
 func testReq() core.ChatRequest {
-	return core.ChatRequest{Messages: []core.Message{{Role: "system", Content: "be brief"}, {Role: "user", Content: "hello"}}}
+	return core.ChatRequest{MaxOutputTokens: 64, Messages: []core.Message{core.TextMessage(core.RoleSystem, "be brief"), core.TextMessage(core.RoleUser, "hello")}}
 }
 
 func TestOpenAICompleteAndStream(t *testing.T) {
@@ -33,7 +33,7 @@ func TestOpenAICompleteAndStream(t *testing.T) {
 		io.WriteString(w, `{"choices":[{"message":{"content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1}}`)
 	}))
 	defer srv.Close()
-	p := &OpenAI{Key: "test-key", BaseURL: srv.URL, Client: srv.Client()}
+	p := &OpenAI{Key: "test-key", BaseURL: srv.URL + "/v1", Client: srv.Client()}
 	c, err := p.Complete(context.Background(), "fake-model", testReq())
 	if err != nil || c.Text != "hello" || c.Usage.TotalTokens != 6 {
 		t.Fatalf("unexpected %v %+v", err, c)

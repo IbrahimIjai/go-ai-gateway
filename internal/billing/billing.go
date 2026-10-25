@@ -3,8 +3,10 @@
 package billing
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +19,11 @@ import (
 func CostMicros(u core.Usage, p *core.Price) (int64, bool) {
 	if p == nil {
 		return 0, false
+	}
+	// Long-context pricing applies to the whole request once input passes
+	// the threshold (Gemini and Anthropic price it this way).
+	if p.LongContext != nil && u.InputTokens > p.LongContextThreshold {
+		p = p.LongContext
 	}
 	standard := u.InputTokens - u.CachedInput - u.CacheWrite
 	if standard < 0 || u.OutputTokens < 0 || u.CachedInput < 0 || u.CacheWrite < 0 {
@@ -33,6 +40,26 @@ func CostMicros(u core.Usage, p *core.Price) (int64, bool) {
 		return 0, false
 	}
 	return n.Int64(), true
+}
+// ParseUSD reads a fixed-point USD amount such as "1.25" exactly into
+// microUSD: at most 6 decimal places, no float rounding, no sign.
+func ParseUSD(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	whole, frac, hasFrac := strings.Cut(raw, ".")
+	if whole == "" || len(whole) > 6 || (hasFrac && (frac == "" || len(frac) > 6)) {
+		return 0, fmt.Errorf("invalid USD amount %q: want digits with up to 6 decimal places", raw)
+	}
+	var micros int64
+	for _, c := range whole + frac + strings.Repeat("0", 6-len(frac)) {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("invalid USD amount %q", raw)
+		}
+		micros = micros*10 + int64(c-'0')
+	}
+	if micros > 100_000*1_000_000 {
+		return 0, errors.New("USD amount above 100000 is not a plausible token rate")
+	}
+	return micros, nil
 }
 func FormatUSD(micros int64) string {
 	return fmt.Sprintf("%d.%06d", micros/1_000_000, micros%1_000_000)

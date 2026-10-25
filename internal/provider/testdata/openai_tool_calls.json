@@ -1,0 +1,5 @@
+{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",
+ "choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":null,"tool_calls":[
+   {"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}},
+   {"id":"call_b","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Rome\"}"}}]},"finish_reason":"tool_calls"}],
+ "usage":{"prompt_tokens":80,"completion_tokens":40,"total_tokens":120,"prompt_tokens_details":{"cached_tokens":64},"completion_tokens_details":{"reasoning_tokens":0}}}

@@ -1,0 +1,12 @@
+{"model":"m","max_tokens":256,"stream":false,"system":"Be brief.",
+ "messages":[
+  {"role":"user","content":"Weather in Paris and Rome?"},
+  {"role":"assistant","content":[
+    {"type":"text","text":"Checking."},
+    {"type":"tool_use","id":"call_1","name":"get_weather","input":{"city":"Paris"}},
+    {"type":"tool_use","id":"call_2","name":"get_weather","input":{"city":"Rome"}}]},
+  {"role":"user","content":[
+    {"type":"tool_result","tool_use_id":"call_1","content":"{\"temp_c\":21}"},
+    {"type":"tool_result","tool_use_id":"call_2","content":"sunny"}]}],
+ "tools":[{"name":"get_weather","description":"Current weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],
+ "tool_choice":{"type":"auto"}}

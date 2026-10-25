@@ -8,7 +8,7 @@
 
 **Important:** `db/`, `contracts/` and `config/` are **design artifacts**, not currently connected to the running app.
 
-**Runnable starter / learning project.** A text-only OpenAI-compatible Chat Completions API backed by a real provider abstraction, normal and SSE-streaming adapters for OpenAI, Anthropic and Gemini, a basic fallback router and an in-memory usage journal.
+**Runnable starter / learning project.** An OpenAI-compatible Chat Completions API (text and tool calling) backed by a real provider abstraction, normal and SSE-streaming adapters for OpenAI, Anthropic and Gemini, a basic fallback router and an in-memory usage journal.
 
 **No account, payment, or real API key is required to run the included `demo/echo` model.** The demo is deterministic and is **not an AI model**.
 
@@ -117,18 +117,19 @@ Before committing, `gofmt -l cmd internal` should print nothing and `go vet ./..
 
 | Feature | Status |
 |---|---|
-| `POST /v1/chat/completions` text-only | ✅ implemented |
+| `POST /v1/chat/completions`: text, content parts, tools | ✅ implemented |
 | `GET /v1/models` | ✅ implemented |
 | `GET /v1/usage` (demo memory) | ✅ implemented |
 | API bearer key | ✅ simple single local key |
 | OpenAI, Anthropic, Gemini calls | ✅ adapter code + mocked tests |
-| Provider-specific message translation | ✅ text messages |
-| SSE streaming normalized to Chat Completions chunks | ✅ basic text streaming |
+| Provider-specific translation of messages, tools and tool results | ✅ OpenAI, Anthropic, Gemini |
+| SSE streaming normalized to Chat Completions chunks | ✅ text and tool-call deltas |
 | Usage metadata normalized and recorded | ✅ when upstream returns usage |
 | `router/auto` fallback before the first byte, on provider-side failures | ✅ |
 | Cut or silent upstream streams end with an error, never a false `[DONE]` | ✅ |
 | Query-aware quality/latency model scoring | ☐ future |
-| Tool calling / JSON schema / images / audio | ☐ future |
+| `response_format` JSON / JSON schema | ✅ OpenAI, Gemini (Anthropic: refused, never dropped) |
+| Images / audio | ☐ future |
 | Persistent DB ledger / balances / multi-tenant keys | ☐ future |
 | Credit reservation/settlement/reconciliation | ☐ future |
 | MCP / x402 / agent payment | ☐ optional future |
@@ -159,10 +160,10 @@ client <- normalized JSON or SSE <- usage metadata <- adapter
 
 ## Known limits
 
-1. **Text-only**: the API rejects unknown request fields (e.g. `tools`, `response_format`) rather than silently breaking them. Messages must contain string content. No Responses API support yet.
+1. **Text and tools only**: images, audio, `n`, logprobs and other unsupported fields are rejected rather than silently dropped. A feature one provider cannot honor (strict tool schemas outside OpenAI, `response_format` on Anthropic) is refused with a 400 for that model; `router/auto` moves on to a model that can. No Responses API support yet.
 2. **This is not an accounting ledger.** All usage is in-process and disappears on restart. No pre-authorization, charging, invoices, refunds or tenant isolation.
 3. **Real pricing is optional and must be verified.** Missing pricing is unknown, not free. Cache billing variants and Gemini thought tokens may need vendor/tier-specific treatment before real financial use.
-4. **Streaming:** upstream errors after output cannot be safely retried. A stream counts as finished only on the provider's end marker; a cut connection, or 120 s without upstream data, ends it with an error frame and no `[DONE]`. Interrupted streams are logged as `usage_unavailable`; this requires later reconciliation. Streaming currently uses basic text chunks and ignores advanced multimodal/tool events.
+4. **Streaming:** upstream errors after output cannot be safely retried. A stream counts as finished only on the provider's end marker; a cut connection, or 120 s without upstream data, ends it with an error frame and no `[DONE]`. Interrupted streams are logged as `usage_unavailable`; this requires later reconciliation. Multimodal stream events are not supported.
 5. **Fallback policy:** `router/auto` moves to the next model only before the first byte reaches the client, and only for provider-side failures: rate limits, timeouts, 5xx, network errors, an exhausted provider quota or a refused provider key. An invalid request is never retried elsewhere. Set `MINIROUTER_FIRST_EVENT_TIMEOUT` (for example `20s`) to also hand over when a model is slow to start; the last candidate always waits. It does not provide cross-provider fallback for an explicit model name. `router/auto` may change the chosen model and must not be used when a caller requires one exact model.
 6. **Security:** no HTTPS server, audit logging, abuse prevention, per-client rates or durable key storage. Local binding defaults to `127.0.0.1` for safety. Put a trusted TLS-terminating reverse proxy in front if deploying.
 7. **No concurrency-based money enforcement** yet; `/v1/usage` is observational. Configure upstream hard limits yourself.

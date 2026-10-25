@@ -27,8 +27,46 @@ const (
 	ClassCallerFault FailureClass = "caller_fault" // other 4xx: the request itself is invalid
 	ClassTimeout     FailureClass = "timeout"      // 408 and deadlines: network, idle or first event
 	ClassCancelled   FailureClass = "cancelled"    // the client went away
+	ClassUnsupported FailureClass = "unsupported"  // this provider cannot honor a request feature; another may
 	ClassUnknown     FailureClass = "unknown"      // malformed responses and gateway bugs
 )
+
+// UnsupportedError reports a request feature a provider cannot honor. The
+// request is refused rather than sent without the feature.
+type UnsupportedError struct {
+	Provider string
+	Feature  string
+}
+
+func (e *UnsupportedError) Error() string { return e.Provider + " does not support " + e.Feature }
+
+// streamError is a failure a provider reported inside an HTTP 200 stream.
+type streamError struct {
+	class FailureClass
+	code  string
+}
+
+func (e *streamError) Error() string {
+	return fmt.Sprintf("upstream stream error (%s): %s", e.class, e.code)
+}
+
+// newStreamError classifies an error event from a stream. Providers name
+// these with the codes they use for HTTP errors; Gemini adds the HTTP status.
+func newStreamError(body []byte) error {
+	code, message := providerError(body)
+	class := classifyCode(code, message)
+	var v struct {
+		Error struct {
+			Code any `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &v) == nil {
+		if status, ok := v.Error.Code.(float64); ok && status >= 400 {
+			class = classify(int(status), code, message)
+		}
+	}
+	return &streamError{class: class, code: code}
+}
 
 // APIError is an upstream HTTP error. Message is the status text: upstream
 // bodies are read only to classify the failure, never echoed or logged.
@@ -57,10 +95,16 @@ func Class(err error) FailureClass {
 		return ""
 	}
 	var api *APIError
+	var inStream *streamError
+	var unsupported *UnsupportedError
 	var netErr net.Error
 	switch {
 	case errors.As(err, &api):
 		return api.class()
+	case errors.As(err, &inStream):
+		return inStream.class
+	case errors.As(err, &unsupported):
+		return ClassUnsupported
 	case errors.Is(err, context.Canceled):
 		return ClassCancelled
 	case errors.Is(err, context.DeadlineExceeded):
@@ -80,7 +124,7 @@ func Class(err error) FailureClass {
 // failed: the fault lies with the provider, not the request or the client.
 func Retryable(err error) bool {
 	switch Class(err) {
-	case ClassTransient, ClassRateLimit, ClassTimeout, ClassQuota, ClassCredential, ClassModelGone:
+	case ClassTransient, ClassRateLimit, ClassTimeout, ClassQuota, ClassCredential, ClassModelGone, ClassUnsupported:
 		return true
 	}
 	return false
@@ -113,6 +157,22 @@ func classify(status int, code, message string) FailureClass {
 		return ClassModelGone
 	case status >= 400:
 		return ClassCallerFault
+	}
+	return ClassUnknown
+}
+
+// classifyCode maps a provider error code that arrived without an HTTP status,
+// as in a stream error event.
+func classifyCode(code, message string) FailureClass {
+	switch {
+	case code == "insufficient_quota", code == "blocked_api_access", containsAny(message, quotaMarkers):
+		return ClassQuota
+	case strings.Contains(code, "rate_limit"), code == "RESOURCE_EXHAUSTED":
+		return ClassRateLimit
+	case code == "DEADLINE_EXCEEDED":
+		return ClassTimeout
+	case code == "overloaded_error", code == "api_error", code == "server_error", code == "UNAVAILABLE", code == "INTERNAL":
+		return ClassTransient
 	}
 	return ClassUnknown
 }

@@ -129,10 +129,19 @@ func (r *Router) open(ctx context.Context, p provider.Provider, m core.Model, re
 		deadline = time.AfterFunc(r.FirstEventTimeout, cancel)
 	}
 	stream, err := p.Stream(ctx, m.Upstream, req)
-	var first core.Chunk
-	if err == nil {
-		if first, err = stream.Recv(); err == io.EOF {
+	// Commit only once something a client would see arrives; usage-only
+	// chunks before it are held back with it.
+	var pending []core.Chunk
+	for err == nil {
+		var c core.Chunk
+		if c, err = stream.Recv(); err == io.EOF {
 			err = fmt.Errorf("upstream stream ended without content")
+		}
+		if err == nil {
+			pending = append(pending, c)
+			if c.HasContent() {
+				break
+			}
 		}
 	}
 	if deadline != nil && !deadline.Stop() {
@@ -146,13 +155,13 @@ func (r *Router) open(ctx context.Context, p provider.Provider, m core.Model, re
 		cancel()
 		return nil, err
 	}
-	return &peekStream{Stream: stream, first: &first, cancel: cancel}, nil
+	return &peekStream{Stream: stream, pending: pending, cancel: cancel}, nil
 }
 
 type peekStream struct {
 	provider.Stream
-	first  *core.Chunk
-	cancel context.CancelFunc
+	pending []core.Chunk
+	cancel  context.CancelFunc
 }
 
 func (s *peekStream) Close() error {
@@ -162,9 +171,9 @@ func (s *peekStream) Close() error {
 }
 
 func (s *peekStream) Recv() (core.Chunk, error) {
-	if s.first != nil {
-		c := *s.first
-		s.first = nil
+	if len(s.pending) > 0 {
+		c := s.pending[0]
+		s.pending = s.pending[1:]
 		return c, nil
 	}
 	return s.Stream.Recv()
