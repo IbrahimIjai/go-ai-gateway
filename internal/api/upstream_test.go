@@ -7,8 +7,10 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"example.com/minirouter/internal/billing"
+	"example.com/minirouter/internal/catalog"
 	"example.com/minirouter/internal/core"
 	"example.com/minirouter/internal/provider"
 	"example.com/minirouter/internal/router"
@@ -48,10 +50,13 @@ func (s *scriptedStream) Recv() (core.Chunk, error) {
 }
 func (*scriptedStream) Close() error { return nil }
 
+func noSleep(context.Context, time.Duration) error { return nil }
+
 func serverWith(p provider.Provider) *Server {
 	return &Server{Key: "local-test-key", Store: billing.NewStore(), Router: &router.Router{
-		Providers: map[string]provider.Provider{"scripted": p},
-		Models:    []core.Model{{ID: "scripted/model", Provider: "scripted"}},
+		Providers: map[string]provider.Provider{"scripted/model": p},
+		Catalog:   catalog.Static("scripted/model"),
+		Sleep:     noSleep,
 	}}
 }
 

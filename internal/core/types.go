@@ -167,11 +167,32 @@ type Price struct {
 }
 
 type UsageRecord struct {
-	ID       string    `json:"id"`
-	Model    string    `json:"model"`
-	Provider string    `json:"provider"`
-	Status   string    `json:"status"`
-	Usage    *Usage    `json:"usage,omitempty"`
-	CostUSD  *string   `json:"cost_usd,omitempty"`
-	Time     time.Time `json:"time"`
+	ID         string         `json:"id"`
+	Model      string         `json:"model"`
+	Provider   string         `json:"provider"`
+	Deployment string         `json:"deployment,omitempty"`
+	Status     string         `json:"status"`
+	Usage      *Usage         `json:"usage,omitempty"`
+	CostUSD    *string        `json:"cost_usd,omitempty"`
+	Route      *RouteDecision `json:"route,omitempty"`
+	Time       time.Time      `json:"time"`
+}
+
+// RouteDecision explains how a request was routed (ADR-012). It never holds
+// prompt text.
+type RouteDecision struct {
+	Requested  string    `json:"requested"`
+	Policy     string    `json:"policy"` // exact | alias:<policy>
+	Model      string    `json:"model,omitempty"`
+	Deployment string    `json:"deployment,omitempty"`
+	Attempts   []Attempt `json:"attempts"`
+	Reasons    []string  `json:"reasons"`
+}
+
+// Attempt is one try at one deployment. Class is empty on success.
+type Attempt struct {
+	Deployment string `json:"deployment"`
+	Class      string `json:"class,omitempty"`
+	Status     int    `json:"status,omitempty"`
+	Millis     int64  `json:"ms"`
 }

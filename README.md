@@ -4,9 +4,10 @@
 
 - **Run it now:** follow [Quick start](#quick-start-go-123) below; no vendor credentials required.
 - **Work on it:** [Development commands](#development-commands) for run, build, test, vet and format.
-- **Inspect the future contract/schema:** [OpenAPI design](contracts/openapi.yaml), [PostgreSQL migrations](db/migrations/) and [catalog examples](config/).
+- **Configure models and providers:** [example catalog](config/minirouter.example.json), explained in [Catalog file](#catalog-file).
+- **Inspect the future contract/schema:** [OpenAPI design](contracts/openapi.yaml) and [PostgreSQL migrations](db/migrations/).
 
-**Important:** `db/`, `contracts/` and `config/` are **design artifacts**, not currently connected to the running app.
+**Important:** `db/` and `contracts/` are **design artifacts**, not currently connected to the running app.
 
 **Runnable starter / learning project.** An OpenAI-compatible Chat Completions API (text and tool calling) backed by a real provider abstraction, normal and SSE-streaming adapters for OpenAI, Anthropic and Gemini, a basic fallback router and an in-memory usage journal.
 
@@ -95,6 +96,26 @@ export OPENAI_CACHE_READ_USD_PER_1M='0.500000'
 
 The billing package calculates to **microUSD** using integer arithmetic. Known-cost requests appear in `/v1/usage` as `cost_usd`, while requests with missing prices have no cost value and are counted as `unpriced_requests`.
 
+## Catalog file
+
+Environment variables are enough for a quick start. For more than one model per provider, OpenAI-compatible hosts (Moonshot, Together, Fireworks, ...) or one model served by several hosts, describe the catalog in JSON and point `MINIROUTER_CONFIG` at it:
+
+```bash
+export MINIROUTER_CONFIG=config/minirouter.example.json
+go run ./cmd/minirouter
+```
+
+- **models** are what callers ask for, with capabilities and limits.
+- **deployments** are where a model runs: provider, upstream model ID, priority, weight, concurrency cap and price. An exact model ID only ever uses its own deployments.
+- **aliases** such as `router/auto` try several models in order.
+- **providers** name the environment variable holding each key; secrets never go in the file.
+
+Startup validation reports every problem at once, and unknown fields are errors. Prices are USD per million tokens as exact decimal strings; a price is billed only once `verified_at` is set. To draft entries from LiteLLM's price list (MIT):
+
+```bash
+go run ./cmd/catalog-import -prices model_prices_and_context_window.json gpt-4.1-mini claude-haiku-4-5
+```
+
 ## Development commands
 
 Run these from the repository root. The Go toolchain is the build system; there is no Makefile.
@@ -130,6 +151,7 @@ Before committing, `gofmt -l cmd internal` should print nothing and `go vet ./..
 | Query-aware quality/latency model scoring | ☐ future |
 | `response_format` JSON / JSON schema | ✅ OpenAI, Gemini (Anthropic: refused, never dropped) |
 | Images / audio | ☐ future |
+| Catalog: models vs deployments, JSON config, OpenAI-compatible hosts | ✅ |
 | Persistent DB ledger / balances / multi-tenant keys | ☐ future |
 | Credit reservation/settlement/reconciliation | ☐ future |
 | MCP / x402 / agent payment | ☐ optional future |
@@ -137,14 +159,16 @@ Before committing, `gofmt -l cmd internal` should print nothing and `go vet ./..
 ## Internal structure
 
 ```text
-cmd/minirouter/main.go       env configuration and server boot
+cmd/minirouter/main.go       configuration and server boot
+cmd/catalog-import/           draft catalog entries from LiteLLM prices
 internal/api/                 HTTP handlers, strict input validation, SSE output
-internal/core/                shared request, model, usage, price types
+internal/core/                shared request, message, tool, usage and price types
+internal/catalog/             models, deployments, aliases; JSON config and validation
 internal/provider/            upstream adapters and SSE parsing
 internal/router/              model resolution, fallback, stream preflight
 internal/billing/             microUSD cost calculation, demo usage journal
 examples/                     request JSON
-config/                      future catalog/pricing examples (not wired in)
+config/                      example catalog
 contracts/                   target OpenAPI (not wired in)
 db/migrations/               planned PostgreSQL tables (not applied)
 ```

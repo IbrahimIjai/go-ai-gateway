@@ -179,14 +179,16 @@ func (c Config) Validate(getenv func(string) string) error {
 	bad := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
 	providers := map[string]bool{}
 	for _, p := range c.Providers {
-		switch {
-		case p.Name == "" || providers[p.Name]:
+		if p.Name == "" || providers[p.Name] {
 			bad("provider %q: names must be unique and non-empty", p.Name)
-		case !providerTypes[p.Type]:
+		}
+		if !providerTypes[p.Type] {
 			bad("provider %q: unknown type %q", p.Name, p.Type)
-		case p.Type == "openai_compatible" && p.BaseURL == "":
+		}
+		if p.Type == "openai_compatible" && p.BaseURL == "" {
 			bad("provider %q: openai_compatible needs base_url", p.Name)
-		case p.Type != "demo" && (p.APIKeyEnv == "" || getenv(p.APIKeyEnv) == ""):
+		}
+		if p.Type != "demo" && (p.APIKeyEnv == "" || getenv(p.APIKeyEnv) == "") {
 			bad("provider %q: set api_key_env to an environment variable holding the key (%q is empty)", p.Name, p.APIKeyEnv)
 		}
 		if p.BaseURL != "" {

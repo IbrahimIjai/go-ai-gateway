@@ -41,6 +41,7 @@ func CostMicros(u core.Usage, p *core.Price) (int64, bool) {
 	}
 	return n.Int64(), true
 }
+
 // ParseUSD reads a fixed-point USD amount such as "1.25" exactly into
 // microUSD: at most 6 decimal places, no float rounding, no sign.
 func ParseUSD(raw string) (int64, error) {
@@ -75,14 +76,16 @@ type Store struct {
 }
 
 func NewStore() *Store { return &Store{records: make([]core.UsageRecord, 0, 128)} }
-func (s *Store) Add(r core.UsageRecord, m core.Model) {
+
+// Add records one request; price is the serving deployment's billable rate.
+func (s *Store) Add(r core.UsageRecord, price *core.Price) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r.Time.IsZero() {
 		r.Time = time.Now().UTC()
 	}
 	if r.Usage != nil && r.Status == "ok" {
-		if n, known := CostMicros(*r.Usage, m.Price); known {
+		if n, known := CostMicros(*r.Usage, price); known {
 			s.total += n
 			s.priced++
 			value := FormatUSD(n)

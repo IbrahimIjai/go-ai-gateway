@@ -1,0 +1,26 @@
+{
+  "providers": [
+    {"name": "openai", "type": "openai", "api_key_env": "OPENAI_API_KEY"},
+    {"name": "anthropic", "type": "anthropic", "api_key_env": "ANTHROPIC_API_KEY"},
+    {"name": "google", "type": "gemini", "api_key_env": "GEMINI_API_KEY"},
+    {"name": "together", "type": "openai_compatible", "base_url": "https://api.together.xyz/v1", "api_key_env": "TOGETHER_API_KEY", "max_tokens_field": "max_tokens", "developer_as_system": true},
+    {"name": "fireworks", "type": "openai_compatible", "base_url": "https://api.fireworks.ai/inference/v1", "api_key_env": "FIREWORKS_API_KEY", "max_tokens_field": "max_tokens", "developer_as_system": true, "stream_idle_timeout": "90s"}
+  ],
+  "models": [
+    {"id": "openai/gpt-4.1-mini", "capabilities": {"tools": true, "structured_output": true}, "context_tokens": 1047576, "max_output_tokens": 32768, "quality": 0.7},
+    {"id": "anthropic/claude-haiku-4-5", "capabilities": {"tools": true}, "context_tokens": 200000, "max_output_tokens": 64000, "quality": 0.7},
+    {"id": "google/gemini-2.5-flash", "capabilities": {"tools": true, "structured_output": true}, "context_tokens": 1048576, "max_output_tokens": 65536, "quality": 0.7},
+    {"id": "open/llama-3.3-70b", "capabilities": {"tools": true}, "context_tokens": 131072, "max_output_tokens": 8192, "quality": 0.6}
+  ],
+  "deployments": [
+    {"id": "openai/gpt-4.1-mini", "model": "openai/gpt-4.1-mini", "provider": "openai", "upstream_model": "gpt-4.1-mini",
+     "price": {"input": "0.40", "output": "1.60", "cache_read": "0.10", "source_url": "https://openai.com/api/pricing", "verified_at": ""}},
+    {"id": "anthropic/claude-haiku-4-5", "model": "anthropic/claude-haiku-4-5", "provider": "anthropic", "upstream_model": "claude-haiku-4-5"},
+    {"id": "google/gemini-2.5-flash", "model": "google/gemini-2.5-flash", "provider": "google", "upstream_model": "gemini-2.5-flash"},
+    {"id": "llama-70b@together", "model": "open/llama-3.3-70b", "provider": "together", "upstream_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "priority": 1, "weight": 3, "max_concurrency": 32},
+    {"id": "llama-70b@fireworks", "model": "open/llama-3.3-70b", "provider": "fireworks", "upstream_model": "accounts/fireworks/models/llama-v3p3-70b-instruct", "priority": 1, "weight": 1, "max_concurrency": 32}
+  ],
+  "aliases": [
+    {"id": "router/auto", "policy": "ordered", "models": ["google/gemini-2.5-flash", "openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5"]}
+  ]
+}

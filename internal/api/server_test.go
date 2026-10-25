@@ -8,13 +8,13 @@ import (
 	"testing"
 
 	"example.com/minirouter/internal/billing"
-	"example.com/minirouter/internal/core"
+	"example.com/minirouter/internal/catalog"
 	"example.com/minirouter/internal/provider"
 	"example.com/minirouter/internal/router"
 )
 
 func makeTestServer() *Server {
-	return &Server{Key: "local-test-key", Store: billing.NewStore(), Router: &router.Router{Providers: map[string]provider.Provider{"demo": provider.Demo{}}, Models: []core.Model{{ID: "demo/echo", Provider: "demo", Price: &core.Price{}}}}}
+	return &Server{Key: "local-test-key", Store: billing.NewStore(), Router: &router.Router{Providers: map[string]provider.Provider{"demo/echo": provider.Demo{}}, Catalog: catalog.Static("demo/echo"), Sleep: noSleep}}
 }
 func testPost(t *testing.T, s *Server, json string, auth string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -74,6 +74,19 @@ func TestBearerSchemeIsRequired(t *testing.T) {
 	for _, tc := range cases {
 		if rec := testPost(t, s, body, tc.header); rec.Code != tc.want {
 			t.Errorf("%q: want %d, got %d", tc.header, tc.want, rec.Code)
+		}
+	}
+}
+func TestModelsListsCatalog(t *testing.T) {
+	s := makeTestServer()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer local-test-key")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{`"id":"demo/echo"`, `"capabilities":{"tools":true,"structured_output":false}`, `"deployments":[{"id":"demo/echo"`, `"id":"router/auto"`, `"policy":"ordered"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %s in %s", want, body)
 		}
 	}
 }

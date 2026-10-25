@@ -84,3 +84,20 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	c.Aliases = []Alias{{ID: "router/auto", Policy: "ordered", Models: live}}
 	return c, c.Validate(getenv)
 }
+
+// Static is a minimal registry for tests: each id is a model served by one
+// deployment on the provider of the same name, with router/auto over them all
+// in order.
+func Static(ids ...string) *Registry {
+	var c Config
+	for _, id := range ids {
+		c.Models = append(c.Models, Model{ID: id, Capabilities: Capabilities{Tools: true}})
+		c.Deployments = append(c.Deployments, Deployment{ID: id, Model: id, Provider: id, UpstreamModel: id})
+	}
+	c.Aliases = []Alias{{ID: "router/auto", Policy: "ordered", Models: ids}}
+	snap, err := NewSnapshot(c)
+	if err != nil {
+		panic(err)
+	}
+	return NewRegistry(snap)
+}

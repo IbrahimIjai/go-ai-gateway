@@ -28,6 +28,7 @@ const (
 	ClassTimeout     FailureClass = "timeout"      // 408 and deadlines: network, idle or first event
 	ClassCancelled   FailureClass = "cancelled"    // the client went away
 	ClassUnsupported FailureClass = "unsupported"  // this provider cannot honor a request feature; another may
+	ClassAdmission   FailureClass = "admission"    // refused before any upstream call: open breaker, full bulkhead, disabled
 	ClassUnknown     FailureClass = "unknown"      // malformed responses and gateway bugs
 )
 
@@ -39,6 +40,17 @@ type UnsupportedError struct {
 }
 
 func (e *UnsupportedError) Error() string { return e.Provider + " does not support " + e.Feature }
+
+// AdmissionError means the gateway refused to call a deployment at all, so
+// nothing was sent upstream and nothing can have been billed.
+type AdmissionError struct {
+	Deployment string
+	Reason     string // disabled | breaker_open | concurrency_full
+}
+
+func (e *AdmissionError) Error() string {
+	return "deployment " + e.Deployment + " not admitted: " + e.Reason
+}
 
 // streamError is a failure a provider reported inside an HTTP 200 stream.
 type streamError struct {
@@ -97,6 +109,7 @@ func Class(err error) FailureClass {
 	var api *APIError
 	var inStream *streamError
 	var unsupported *UnsupportedError
+	var admission *AdmissionError
 	var netErr net.Error
 	switch {
 	case errors.As(err, &api):
@@ -105,6 +118,8 @@ func Class(err error) FailureClass {
 		return inStream.class
 	case errors.As(err, &unsupported):
 		return ClassUnsupported
+	case errors.As(err, &admission):
+		return ClassAdmission
 	case errors.Is(err, context.Canceled):
 		return ClassCancelled
 	case errors.Is(err, context.DeadlineExceeded):
@@ -124,7 +139,7 @@ func Class(err error) FailureClass {
 // failed: the fault lies with the provider, not the request or the client.
 func Retryable(err error) bool {
 	switch Class(err) {
-	case ClassTransient, ClassRateLimit, ClassTimeout, ClassQuota, ClassCredential, ClassModelGone, ClassUnsupported:
+	case ClassTransient, ClassRateLimit, ClassTimeout, ClassQuota, ClassCredential, ClassModelGone, ClassUnsupported, ClassAdmission:
 		return true
 	}
 	return false

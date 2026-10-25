@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"example.com/minirouter/internal/billing"
+	"example.com/minirouter/internal/catalog"
 	"example.com/minirouter/internal/core"
 	"example.com/minirouter/internal/provider"
 	"example.com/minirouter/internal/router"
@@ -49,20 +50,39 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
-	type item struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		OwnedBy string `json:"owned_by"`
-	}
-	data := make([]item, 0)
-	for _, m := range s.Router.List() {
-		owner := m.Provider
-		if owner == "" {
-			owner = "minirouter"
+	snap := s.Router.Catalog.Load()
+	data := make([]any, 0, len(snap.Models)+len(snap.Aliases))
+	for _, m := range snap.Models {
+		item := map[string]any{"id": m.ID, "object": "model", "owned_by": "minirouter",
+			"capabilities": m.Capabilities, "context_length": nullIfZero(m.ContextTokens), "max_output_tokens": nullIfZero(m.MaxOutputTokens)}
+		var deployments []any
+		for _, d := range snap.Deployments(m.ID) {
+			deployments = append(deployments, map[string]any{"id": d.ID, "provider": d.Provider, "pricing": wirePrice(d.Price)})
 		}
-		data = append(data, item{ID: m.ID, Object: "model", OwnedBy: owner})
+		item["deployments"] = deployments
+		data = append(data, item)
+	}
+	for _, a := range snap.Aliases {
+		data = append(data, map[string]any{"id": a.ID, "object": "model", "owned_by": "minirouter", "policy": a.Policy, "models": a.Models})
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
+
+// wirePrice publishes a deployment's rates in USD per million tokens. Unknown
+// prices are null; unverified ones are marked as drafts, never billed.
+func wirePrice(p *catalog.PriceCard) any {
+	if p == nil {
+		return nil
+	}
+	return map[string]any{"unit": "usd_per_million_tokens", "input": p.Input, "output": p.Output,
+		"cache_read": p.CacheRead, "cache_write": p.CacheWrite, "verified": p.VerifiedAt != "", "source_url": p.SourceURL}
+}
+
+func nullIfZero(n int) any {
+	if n == 0 {
+		return nil
+	}
+	return n
 }
 func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, s.Store.Summary())
@@ -92,26 +112,22 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		s.stream(w, r, req, id, now)
 		return
 	}
-	m, out, err := s.Router.Complete(r.Context(), req)
+	c, out, route, err := s.Router.Complete(r.Context(), req)
+	routeHeaders(w, c, route)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	if out.Usage == nil {
-		s.Store.Add(core.UsageRecord{ID: id, Model: m.ID, Provider: m.Provider, Status: "usage_unavailable"}, m)
-	} else {
-		s.Store.Add(core.UsageRecord{ID: id, Model: m.ID, Provider: m.Provider, Status: "ok", Usage: out.Usage}, m)
-	}
-	w.Header().Set("X-MiniRouter-Provider", m.Provider)
-	w.Header().Set("X-MiniRouter-Resolved-Model", m.ID)
+	s.record(id, c, route, out.Usage, false)
 	jsonOut(w, http.StatusOK, map[string]any{
-		"id": id, "object": "chat.completion", "created": now, "model": m.ID,
+		"id": id, "object": "chat.completion", "created": now, "model": c.Model.ID,
 		"choices": []any{map[string]any{"index": 0, "message": wireMessage(out), "finish_reason": fallbackFinish(out.FinishReason)}},
 		"usage":   wireUsage(out.Usage),
 	})
 }
 func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatRequest, id string, now int64) {
-	m, stream, err := s.Router.Stream(r.Context(), req)
+	c, stream, route, err := s.Router.Stream(r.Context(), req)
+	routeHeaders(w, c, route)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -120,15 +136,13 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatReq
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
-	w.Header().Set("X-MiniRouter-Provider", m.Provider)
-	w.Header().Set("X-MiniRouter-Resolved-Model", m.ID)
 	f, ok := w.(http.Flusher)
 	if !ok {
 		jsonError(w, http.StatusInternalServerError, "internal_error", "streaming not supported")
 		return
 	}
 	write := func(choices []any, usage *core.Usage) error {
-		raw, err := json.Marshal(map[string]any{"id": id, "object": "chat.completion.chunk", "created": now, "model": m.ID, "choices": choices, "usage": wireUsage(usage)})
+		raw, err := json.Marshal(map[string]any{"id": id, "object": "chat.completion.chunk", "created": now, "model": c.Model.ID, "choices": choices, "usage": wireUsage(usage)})
 		if err != nil {
 			return err
 		}
@@ -145,14 +159,14 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatReq
 	var finish string
 	failed := false
 	for {
-		c, err := stream.Recv()
+		chunk, err := stream.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			failed = true
 			if s.Log != nil {
-				s.Log.Warn("upstream streaming interrupted", "model", m.ID, "error", err)
+				s.Log.Warn("upstream streaming interrupted", "model", c.Model.ID, "deployment", c.Deployment.ID, "error", err)
 			}
 			// No [DONE] marker: the stream is incomplete and its cost is unknown.
 			errorPayload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": "upstream stream interrupted", "type": "upstream_error"}})
@@ -160,24 +174,20 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatReq
 			f.Flush()
 			break
 		}
-		if c.Usage != nil {
-			usage = c.Usage
+		if chunk.Usage != nil {
+			usage = chunk.Usage
 		}
-		if c.FinishReason != "" {
-			finish = c.FinishReason
+		if chunk.FinishReason != "" {
+			finish = chunk.FinishReason
 		}
-		if delta := wireDelta(c); delta != nil {
+		if delta := wireDelta(chunk); delta != nil {
 			if err := write([]any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}}, nil); err != nil {
 				failed = true
 				break
 			}
 		}
 	}
-	if failed || usage == nil {
-		s.Store.Add(core.UsageRecord{ID: id, Model: m.ID, Provider: m.Provider, Status: "usage_unavailable"}, m)
-	} else {
-		s.Store.Add(core.UsageRecord{ID: id, Model: m.ID, Provider: m.Provider, Status: "ok", Usage: usage}, m)
-	}
+	s.record(id, c, route, usage, failed)
 	if failed {
 		return
 	}
@@ -200,12 +210,14 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 	class := provider.Class(err)
 	var upstream *provider.APIError
 	isUpstream := errors.As(err, &upstream)
-	if !isUpstream && s.Log != nil {
+	if !isUpstream && class != provider.ClassAdmission && s.Log != nil {
 		s.Log.Error("gateway request failure", "class", class, "error", err)
 	}
 	switch {
 	case class == provider.ClassUnsupported:
 		jsonError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+	case class == provider.ClassAdmission:
+		jsonError(w, http.StatusServiceUnavailable, "upstream_unavailable", "no deployment can take this request right now; try again later")
 	case class == provider.ClassQuota:
 		jsonError(w, http.StatusBadGateway, "upstream_error", "provider account quota or credit is exhausted; retrying will not help")
 	case class == provider.ClassCredential:
@@ -220,6 +232,27 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		jsonError(w, http.StatusBadGateway, "upstream_error", "provider request failed")
 	}
 }
+
+// record journals one served request. A cut stream or missing usage is
+// recorded as unavailable, never as zero.
+func (s *Server) record(id string, c router.Candidate, route core.RouteDecision, usage *core.Usage, failed bool) {
+	r := core.UsageRecord{ID: id, Model: c.Model.ID, Provider: c.Deployment.Provider, Deployment: c.Deployment.ID, Status: "ok", Usage: usage, Route: &route}
+	if failed || usage == nil {
+		r.Status, r.Usage = "usage_unavailable", nil
+	}
+	s.Store.Add(r, c.Price)
+}
+
+// routeHeaders explains the routing, on failures too.
+func routeHeaders(w http.ResponseWriter, c router.Candidate, route core.RouteDecision) {
+	for k, v := range router.Headers(route) {
+		w.Header().Set(k, v)
+	}
+	if c.Deployment.Provider != "" {
+		w.Header().Set("X-MiniRouter-Provider", c.Deployment.Provider)
+	}
+}
+
 func fallbackFinish(s string) string {
 	if s == "" {
 		return "stop"
