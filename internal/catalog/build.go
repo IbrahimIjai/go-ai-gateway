@@ -81,7 +81,9 @@ func FromEnv(getenv func(string) string) (Config, error) {
 		}
 		sort.SliceStable(live, func(i, j int) bool { return cost[live[i]] < cost[live[j]] })
 	}
-	c.Aliases = []Alias{{ID: "router/auto", Policy: "ordered", Models: live}}
+	// router/auto keeps the configured order here: env models carry no
+	// quality rating to weigh. A catalog file can use the auto policy.
+	c.Aliases = []Alias{{ID: "router/auto", Policy: "ordered", Models: live}, {ID: "router/eco", Policy: "eco", Models: live}, {ID: "router/fast", Policy: "fast", Models: live}}
 	return c, c.Validate(getenv)
 }
 

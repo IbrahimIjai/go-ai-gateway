@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -78,5 +80,21 @@ func TestStreamedToolCallDeltas(t *testing.T) {
 	want := `"tool_calls":[{"function":{"arguments":"{}","name":"get_weather"},"id":"call_demo_1","index":0,"type":"function"}]`
 	if !strings.Contains(body, want) || !strings.Contains(body, `"finish_reason":"tool_calls"`) {
 		t.Fatalf("missing OpenAI-shaped tool call delta: %s", body)
+	}
+}
+
+func TestExplainAndNoEligibleModel(t *testing.T) {
+	s := makeTestServer()
+	body := `{"model":"router/auto","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/route/explain", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-test-key")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"plan":["demo/echo"]`) || !strings.Contains(rec.Body.String(), `"policy":"alias:ordered"`) {
+		t.Fatalf("explain: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = testPost(t, s, `{"model":"demo/echo","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}`, "Bearer local-test-key")
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "no_eligible_model") || !strings.Contains(rec.Body.String(), "no structured output") {
+		t.Fatalf("want a 400 naming why: %d %s", rec.Code, rec.Body.String())
 	}
 }

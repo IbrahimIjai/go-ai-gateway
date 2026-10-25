@@ -21,6 +21,9 @@
     {"id": "llama-70b@fireworks", "model": "open/llama-3.3-70b", "provider": "fireworks", "upstream_model": "accounts/fireworks/models/llama-v3p3-70b-instruct", "priority": 1, "weight": 1, "max_concurrency": 32}
   ],
   "aliases": [
-    {"id": "router/auto", "policy": "ordered", "models": ["google/gemini-2.5-flash", "openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5"]}
+    {"id": "router/auto", "policy": "auto", "models": ["google/gemini-2.5-flash", "openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5", "open/llama-3.3-70b"]},
+    {"id": "router/eco", "policy": "eco", "models": ["google/gemini-2.5-flash", "openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5", "open/llama-3.3-70b"]},
+    {"id": "router/fast", "policy": "fast", "models": ["google/gemini-2.5-flash", "openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5", "open/llama-3.3-70b"]},
+    {"id": "router/ordered", "policy": "ordered", "models": ["google/gemini-2.5-flash", "openai/gpt-4.1-mini"]}
   ]
 }

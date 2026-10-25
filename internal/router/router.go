@@ -178,6 +178,49 @@ func (r *Router) shuffle(tier []Candidate) {
 	}
 }
 
+// route gates every model, ranks the survivors by the alias policy, then
+// orders each model's deployments.
+func (r *Router) route(req core.ChatRequest, policy string, cands []Candidate, d *core.RouteDecision) ([]Candidate, error) {
+	input := estimateInput(req)
+	var eligible [][]Candidate
+	var why []string
+	for _, g := range groups(cands) {
+		if reason := gate(g[0], req, input); reason != "" {
+			why = append(why, g[0].Model.ID+": "+reason)
+			continue
+		}
+		eligible = append(eligible, g)
+	}
+	if len(eligible) == 0 {
+		return nil, &NoEligibleError{Requested: req.Model, Why: why}
+	}
+	for _, w := range why {
+		d.Reasons = append(d.Reasons, "excluded "+w)
+	}
+	ranked, err := r.rank(strings.TrimPrefix(policy, "alias:"), eligible, req, input, d)
+	if err != nil {
+		return nil, err
+	}
+	var flat []Candidate
+	for _, g := range ranked {
+		flat = append(flat, g...)
+	}
+	return r.plan(flat, d), nil
+}
+
+// Explain plans a request without calling any provider: the decision a real
+// request would start from.
+func (r *Router) Explain(req core.ChatRequest) (core.RouteDecision, []Candidate, error) {
+	d := core.RouteDecision{Requested: req.Model, Attempts: []core.Attempt{}, Reasons: []string{}}
+	cands, policy, err := r.Candidates(req.Model)
+	if err != nil {
+		return d, nil, err
+	}
+	d.Policy = policy
+	plan, err := r.route(req, policy, cands, &d)
+	return d, plan, err
+}
+
 func (r *Router) backoff(retry int) time.Duration {
 	p := r.policy()
 	d := min(p.BackoffInitial<<retry, p.BackoffMax)
@@ -197,7 +240,10 @@ func (r *Router) run(ctx context.Context, req core.ChatRequest, stream bool, try
 		return Candidate{}, nil, d, err
 	}
 	d.Policy = policy
-	plan := r.plan(cands, &d)
+	plan, err := r.route(req, policy, cands, &d)
+	if err != nil {
+		return Candidate{}, nil, d, err
+	}
 	p := r.policy()
 	var lastErr error
 	for i, c := range plan {

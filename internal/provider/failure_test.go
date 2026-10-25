@@ -31,6 +31,8 @@ func TestClassifyUpstreamErrors(t *testing.T) {
 		{"gemini billing disabled", 400, `{"error":{"code":400,"message":"This API method requires billing to be enabled.","status":"FAILED_PRECONDITION"}}`, ClassQuota},
 		{"html from a proxy", 502, `<html><body>Bad Gateway</body></html>`, ClassTransient},
 		{"request timeout", 408, ``, ClassTimeout},
+		{"openai context length", 400, `{"error":{"message":"This model's maximum context length is 128000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}`, ClassContext},
+		{"anthropic prompt too long", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}`, ClassContext},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

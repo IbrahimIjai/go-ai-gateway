@@ -36,6 +36,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.auth(s.models))
 	mux.HandleFunc("GET /v1/usage", s.auth(s.usage))
 	mux.HandleFunc("POST /v1/chat/completions", s.auth(s.chat))
+	mux.HandleFunc("POST /v1/route/explain", s.auth(s.explain))
 	return mux
 }
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
@@ -87,23 +88,52 @@ func nullIfZero(n int) any {
 func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, s.Store.Summary())
 }
-func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
+
+// decodeChat reads and validates a chat request, answering 400 itself.
+func decodeChat(w http.ResponseWriter, r *http.Request) (core.ChatRequest, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	var wire chatRequest
 	if err := dec.Decode(&wire); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON or unsupported field: "+err.Error())
-		return
+		return core.ChatRequest{}, false
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
 		jsonError(w, http.StatusBadRequest, "invalid_request_error", "send exactly one JSON object")
-		return
+		return core.ChatRequest{}, false
 	}
 	req, err := wire.toCore()
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return core.ChatRequest{}, false
+	}
+	return req, true
+}
+
+// explain answers how a chat request would be routed, without calling any
+// provider: gates, policy scores and the deployment order.
+func (s *Server) explain(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeChat(w, r)
+	if !ok {
+		return
+	}
+	d, plan, err := s.Router.Explain(req)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	order := make([]string, len(plan))
+	for i, c := range plan {
+		order[i] = c.Deployment.ID
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"decision": d, "plan": order})
+}
+
+func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeChat(w, r)
+	if !ok {
 		return
 	}
 	id := newID()
@@ -205,6 +235,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatReq
 func (s *Server) fail(w http.ResponseWriter, err error) {
 	if errors.Is(err, router.ErrUnknownModel) {
 		jsonError(w, http.StatusNotFound, "model_not_found", "requested model is not available")
+		return
+	}
+	var none *router.NoEligibleError
+	if errors.As(err, &none) {
+		jsonError(w, http.StatusBadRequest, "no_eligible_model", none.Error())
 		return
 	}
 	class := provider.Class(err)

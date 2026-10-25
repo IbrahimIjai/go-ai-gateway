@@ -82,8 +82,11 @@ type PriceCard struct {
 }
 
 type Alias struct {
-	ID     string   `json:"id"`     // e.g. "router/auto"
-	Policy string   `json:"policy"` // "ordered": models in the listed order
+	ID string `json:"id"` // e.g. "router/auto"
+	// Policy orders the models: "ordered" as listed, "eco" cheapest bounded
+	// cost, "fast" lowest observed latency, "auto" weighted quality, cost,
+	// speed and reliability.
+	Policy string   `json:"policy"`
 	Models []string `json:"models"`
 }
 
@@ -171,6 +174,8 @@ func rates(input, output, cacheRead, cacheWrite string) (*core.Price, error) {
 	return &p, nil
 }
 
+var policies = map[string]bool{"ordered": true, "eco": true, "fast": true, "auto": true}
+
 var providerTypes = map[string]bool{"openai": true, "openai_compatible": true, "anthropic": true, "gemini": true, "demo": true}
 
 // Validate reports every problem at once, so one restart fixes them all.
@@ -247,7 +252,7 @@ func (c Config) Validate(getenv func(string) string) error {
 			bad("alias %q: ids must be unique and distinct from model ids", a.ID)
 		}
 		aliases[a.ID] = true
-		if a.Policy != "ordered" {
+		if !policies[a.Policy] {
 			bad("alias %q: unknown policy %q", a.ID, a.Policy)
 		}
 		if len(a.Models) == 0 {

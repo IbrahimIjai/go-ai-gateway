@@ -19,17 +19,18 @@ import (
 type FailureClass string
 
 const (
-	ClassTransient   FailureClass = "transient"    // 5xx, network errors, cut streams
-	ClassRateLimit   FailureClass = "rate_limit"   // 429 without a quota signal
-	ClassQuota       FailureClass = "quota"        // provider account out of credit or over a spend cap
-	ClassCredential  FailureClass = "credential"   // 401/403: the gateway's provider key was refused
-	ClassModelGone   FailureClass = "model_gone"   // 404: model or endpoint unknown upstream
-	ClassCallerFault FailureClass = "caller_fault" // other 4xx: the request itself is invalid
-	ClassTimeout     FailureClass = "timeout"      // 408 and deadlines: network, idle or first event
-	ClassCancelled   FailureClass = "cancelled"    // the client went away
-	ClassUnsupported FailureClass = "unsupported"  // this provider cannot honor a request feature; another may
-	ClassAdmission   FailureClass = "admission"    // refused before any upstream call: open breaker, full bulkhead, disabled
-	ClassUnknown     FailureClass = "unknown"      // malformed responses and gateway bugs
+	ClassTransient   FailureClass = "transient"      // 5xx, network errors, cut streams
+	ClassRateLimit   FailureClass = "rate_limit"     // 429 without a quota signal
+	ClassQuota       FailureClass = "quota"          // provider account out of credit or over a spend cap
+	ClassCredential  FailureClass = "credential"     // 401/403: the gateway's provider key was refused
+	ClassModelGone   FailureClass = "model_gone"     // 404: model or endpoint unknown upstream
+	ClassCallerFault FailureClass = "caller_fault"   // other 4xx: the request itself is invalid
+	ClassTimeout     FailureClass = "timeout"        // 408 and deadlines: network, idle or first event
+	ClassCancelled   FailureClass = "cancelled"      // the client went away
+	ClassUnsupported FailureClass = "unsupported"    // this provider cannot honor a request feature; another may
+	ClassContext     FailureClass = "context_length" // the request is too long for this model; a larger one may fit
+	ClassAdmission   FailureClass = "admission"      // refused before any upstream call: open breaker, full bulkhead, disabled
+	ClassUnknown     FailureClass = "unknown"        // malformed responses and gateway bugs
 )
 
 // UnsupportedError reports a request feature a provider cannot honor. The
@@ -139,7 +140,7 @@ func Class(err error) FailureClass {
 // failed: the fault lies with the provider, not the request or the client.
 func Retryable(err error) bool {
 	switch Class(err) {
-	case ClassTransient, ClassRateLimit, ClassTimeout, ClassQuota, ClassCredential, ClassModelGone, ClassUnsupported, ClassAdmission:
+	case ClassTransient, ClassRateLimit, ClassTimeout, ClassQuota, ClassCredential, ClassModelGone, ClassUnsupported, ClassAdmission, ClassContext:
 		return true
 	}
 	return false
@@ -153,6 +154,10 @@ var quotaMarkers = []string{
 	"spending cap", "requires billing to be enabled", "key limit exceeded", "account is not active",
 }
 
+// contextMarkers say a request exceeded the model's context window, which
+// providers report as a plain 400.
+var contextMarkers = []string{"context_length_exceeded", "maximum context length", "prompt is too long", "input token count", "exceeds the maximum number of tokens", "context window"}
+
 // classify maps a status, the provider's error code and its lowercased message
 // to a class. Quota is checked before rate limit because OpenAI reports an
 // exhausted balance as a 429 too; a 5xx stays transient whatever its body says.
@@ -164,6 +169,8 @@ func classify(status int, code, message string) FailureClass {
 		return ClassQuota
 	case status == http.StatusTooManyRequests:
 		return ClassRateLimit
+	case status == http.StatusBadRequest && (code == "context_length_exceeded" || containsAny(message, contextMarkers)):
+		return ClassContext
 	case status == http.StatusRequestTimeout:
 		return ClassTimeout
 	case status == http.StatusUnauthorized, status == http.StatusForbidden:

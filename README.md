@@ -75,7 +75,7 @@ go run ./cmd/minirouter
 - `anthropic/claude-haiku-4-5` → Anthropic `/v1/messages`
 - `google/gemini-2.5-flash` → Gemini `generateContent`
 - `demo/echo` → deterministic offline test adapter
-- `router/auto` → first eligible configured live model, retrying on transient pre-response errors; demo if no live providers
+- `router/auto` → configured live models in order; `router/eco` cheapest and `router/fast` fastest first; demo if no live providers
 
 If an ID has changed or isn't available, override it with `OPENAI_MODEL`, `ANTHROPIC_MODEL`, or `GEMINI_MODEL`. See `.env.example`.
 
@@ -107,7 +107,7 @@ go run ./cmd/minirouter
 
 - **models** are what callers ask for, with capabilities and limits.
 - **deployments** are where a model runs: provider, upstream model ID, priority, weight, concurrency cap and price. An exact model ID only ever uses its own deployments.
-- **aliases** such as `router/auto` try several models in order.
+- **aliases** such as `router/auto` try several models: `ordered` as listed, `eco` by bounded cost (unpriced models excluded), `fast` by observed latency, `auto` by a weighted score. Models that cannot honor a request (tools, JSON output, context size) are excluded first, and a request no model can serve gets a 400 saying why. `POST /v1/route/explain` shows the plan without calling anyone.
 - **providers** name the environment variable holding each key; secrets never go in the file.
 
 Startup validation reports every problem at once, and unknown fields are errors. Prices are USD per million tokens as exact decimal strings; a price is billed only once `verified_at` is set. To draft entries from LiteLLM's price list (MIT):
@@ -151,7 +151,8 @@ Before committing, `gofmt -l cmd internal` should print nothing and `go vet ./..
 | Per-deployment circuit breaker, concurrency limit, timed auto-disable on quota/key failures | ✅ |
 | Routing explained: `X-MiniRouter-Route-Reason`, `-Attempts`, `-Deployment` headers, journaled per request | ✅ |
 | Cut or silent upstream streams end with an error, never a false `[DONE]` | ✅ |
-| Query-aware quality/latency model scoring | ☐ future |
+| Policy aliases: `router/eco` (cheapest bounded cost), `router/fast` (lowest latency), `router/auto` (weighted quality, cost, speed, reliability) | ✅ |
+| Capability gates that refuse rather than guess; `POST /v1/route/explain` dry run | ✅ |
 | `response_format` JSON / JSON schema | ✅ OpenAI, Gemini (Anthropic: refused, never dropped) |
 | Images / audio | ☐ future |
 | Catalog: models vs deployments, JSON config, OpenAI-compatible hosts | ✅ |

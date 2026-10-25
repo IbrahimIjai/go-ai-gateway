@@ -186,6 +186,7 @@ type RouteDecision struct {
 	Model      string    `json:"model,omitempty"`
 	Deployment string    `json:"deployment,omitempty"`
 	Attempts   []Attempt `json:"attempts"`
+	Scores     []Score   `json:"scores,omitempty"` // policy ranking, best first
 	Reasons    []string  `json:"reasons"`
 }
 
@@ -195,4 +196,14 @@ type Attempt struct {
 	Class      string `json:"class,omitempty"`
 	Status     int    `json:"status,omitempty"`
 	Millis     int64  `json:"ms"`
+}
+
+// Score is one model's ranking under an alias policy, each part within 0–1.
+type Score struct {
+	Model       string  `json:"model"`
+	Total       float64 `json:"total"`
+	Quality     float64 `json:"quality"`
+	Cost        float64 `json:"cost"`
+	Speed       float64 `json:"speed"`
+	Reliability float64 `json:"reliability"`
 }
