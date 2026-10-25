@@ -1,0 +1,19 @@
+# TARGET CONFIG FORMAT — NOT PARSED BY CURRENT GO STARTER.
+# null means UNKNOWN, not free. Do not bill customers before verifying a
+# provider-specific price, its effective date and covered usage categories.
+currency: USD
+unit: micro_usd_per_million_units
+price_versions:
+  - deployment_id: example-openmodel-at-provider-a
+    effective_from: '2026-10-25T00:00:00Z'
+    verified_at: null
+    source_url: null
+    enabled: false
+    rates:
+      input: null
+      output: null
+      cached_input: null
+      cache_write: null
+      reasoning: null
+      image: null
+    customer_markup_basis_points: 0

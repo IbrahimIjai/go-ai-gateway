@@ -1,0 +1,124 @@
+openapi: 3.1.0
+info:
+  title: MiniRouter target API (design contract)
+  version: 1.0.0-design
+  description: >-
+    Planned v1 surface; NOT a statement that the included Go starter implements
+    all paths or tool calling. The starter currently implements text-only
+    /v1/chat/completions, /v1/models, /v1/usage and /healthz.
+servers:
+  - url: http://127.0.0.1:8080
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      security: []
+      summary: Liveness
+      responses:
+        '200': {description: Alive}
+  /readyz:
+    get:
+      summary: Readiness (planned)
+      responses:
+        '200': {description: Ready}
+        '503': {description: Dependencies unhealthy}
+  /v1/models:
+    get:
+      summary: Public model registry
+      responses:
+        '200':
+          description: Models and capabilities
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data]
+                properties:
+                  object: {type: string, const: list}
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, object]
+                      properties:
+                        id: {type: string}
+                        object: {type: string, const: model}
+                        owned_by: {type: string}
+  /v1/chat/completions:
+    post:
+      summary: Compatible chat completion (text/tools target; text only currently)
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema: {type: string, maxLength: 128}
+          description: Planned v1; not supported by scaffold
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, messages]
+              properties:
+                model: {type: string}
+                stream: {type: boolean, default: false}
+                max_completion_tokens: {type: integer, minimum: 1}
+                temperature: {type: number, minimum: 0, maximum: 2}
+                messages:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [role, content]
+                    properties:
+                      role: {type: string}
+                      content:
+                        description: Target supports text and typed content parts; scaffold accepts text string only.
+                        oneOf:
+                          - type: string
+                          - type: array
+                            items: {type: object}
+                tools:
+                  type: array
+                  items: {type: object}
+                  description: Planned v1
+      responses:
+        '200':
+          description: JSON completion or text/event-stream when stream=true
+          content:
+            application/json:
+              schema: {type: object}
+            text/event-stream:
+              schema: {type: string}
+        '400': {description: Invalid request}
+        '401': {description: Invalid key}
+        '402': {description: Insufficient funds (planned)}
+        '429': {description: Rate limit exceeded (planned)}
+        '502': {description: Upstream provider error}
+  /admin/v1/billing/balance:
+    get:
+      summary: Customer available/reserved balance (planned admin auth)
+      responses:
+        '200':
+          description: Balance in microUSD
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  currency: {type: string, const: USD}
+                  balance_micros: {type: integer}
+                  reserved_micros: {type: integer}
+                  available_micros: {type: integer}
+  /admin/v1/usage:
+    get:
+      summary: Query project usage and spend (planned admin auth)
+      responses:
+        '200': {description: Usage page}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer

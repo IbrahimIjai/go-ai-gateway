@@ -1,0 +1,7 @@
+{
+  "model": "router/auto",
+  "messages": [{"role": "user", "content": "Explain SSE in one sentence."}],
+  "stream": true,
+  "stream_options": {"include_usage": true},
+  "max_completion_tokens": 128
+}

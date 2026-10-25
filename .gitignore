@@ -1,0 +1,8 @@
+.env
+*.log
+bin/
+.DS_Store
+coverage.out
+
+# Private design docs and plans: kept locally, never pushed
+/docs/
