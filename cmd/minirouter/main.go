@@ -21,6 +21,9 @@ import (
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	if os.Getenv("MINIROUTER_LOG_FORMAT") == "json" {
+		log = slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	}
 	fail := func(msg string, args ...any) {
 		log.Error(msg, args...)
 		os.Exit(1)
@@ -78,7 +81,12 @@ func main() {
 		}
 		defer db.Close()
 		app.Keys, app.Records, app.Limiter = db, db, limits.New(nil)
+		app.Ping = db.Ping
 		app.Admin = &api.Admin{Key: adminKey, Store: db, Log: log}
+		if os.Getenv("MINIROUTER_CREDITS") == "1" {
+			app.Credits = db // every project request holds its maximum cost first
+			log.Info("prepaid credits enforced; run cmd/worker to resolve holds left by crashes")
+		}
 		if key != "" {
 			log.Warn("MINIROUTER_API_KEY is ignored when MINIROUTER_DATABASE_URL is set; create keys with the admin API")
 			app.Key = ""

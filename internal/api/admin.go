@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"example.com/minirouter/internal/billing"
 	"example.com/minirouter/internal/health"
 	"example.com/minirouter/internal/limits"
 	"example.com/minirouter/internal/store"
@@ -21,6 +22,9 @@ type AdminStore interface {
 	RevokeKey(ctx context.Context, id string) error
 	Usage(ctx context.Context, projectID string, from, to time.Time) ([]store.UsageRow, error)
 	Request(ctx context.Context, id string) (store.Record, error)
+	Grant(ctx context.Context, projectID string, micros int64, reference string) error
+	Balance(ctx context.Context, projectID string) (store.Balance, error)
+	Ledger(ctx context.Context, projectID string, limit int) ([]store.LedgerEntry, error)
 }
 
 // Admin serves /admin/v1 with its own credential: an inference key never
@@ -38,6 +42,9 @@ func (a *Admin) mount(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("DELETE /admin/v1/keys/{id}", a.auth(a.revokeKey))
 	mux.HandleFunc("GET /admin/v1/usage", a.auth(a.usage))
 	mux.HandleFunc("GET /admin/v1/requests/{id}", a.auth(a.request))
+	mux.HandleFunc("POST /admin/v1/credits", a.auth(a.grant))
+	mux.HandleFunc("GET /admin/v1/balance", a.auth(func(w http.ResponseWriter, r *http.Request) { a.balance(w, r) }))
+	mux.HandleFunc("GET /admin/v1/ledger", a.auth(a.ledger))
 	mux.HandleFunc("GET /admin/v1/deployments", a.auth(func(w http.ResponseWriter, r *http.Request) { a.deployments(w, s) }))
 	mux.HandleFunc("POST /admin/v1/deployments/{id}/enable", a.auth(func(w http.ResponseWriter, r *http.Request) {
 		s.Router.Tracker().Enable(r.PathValue("id"))
@@ -177,4 +184,50 @@ func (a *Admin) deployments(w http.ResponseWriter, s *Server) {
 		out[d.ID] = s.Router.Tracker().Stats(d.ID)
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"data": out})
+}
+
+// grant adds test or manual credit. Real top-ups need a verified payment
+// webhook, which is not built; the reference keeps a retried grant single.
+func (a *Admin) grant(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		ProjectID string `json:"project_id"`
+		AmountUSD string `json:"amount_usd"`
+		Reference string `json:"reference"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	micros, err := billing.ParseUSD(in.AmountUSD)
+	if err != nil || micros <= 0 || in.ProjectID == "" || in.Reference == "" {
+		jsonError(w, http.StatusBadRequest, "invalid_request_error", "project_id, a positive amount_usd such as \"10.00\", and a unique reference are required")
+		return
+	}
+	if err := a.Store.Grant(r.Context(), in.ProjectID, micros, in.Reference); err != nil {
+		a.failed(w, err)
+		return
+	}
+	a.balance(w, r.WithContext(r.Context()), in.ProjectID)
+}
+
+func (a *Admin) balance(w http.ResponseWriter, r *http.Request, project ...string) {
+	id := r.URL.Query().Get("project_id")
+	if len(project) > 0 {
+		id = project[0]
+	}
+	b, err := a.Store.Balance(r.Context(), id)
+	if err != nil {
+		a.failed(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"project_id": id, "currency": "USD", "balance": b,
+		"available_usd": billing.FormatUSD(b.AvailableMicros)})
+}
+
+func (a *Admin) ledger(w http.ResponseWriter, r *http.Request) {
+	entries, err := a.Store.Ledger(r.Context(), r.URL.Query().Get("project_id"), 200)
+	if err != nil {
+		a.failed(w, err)
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"data": entries})
 }

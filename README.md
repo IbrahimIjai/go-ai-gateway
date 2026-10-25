@@ -137,6 +137,31 @@ curl -s -X POST localhost:8080/admin/v1/keys -H "$A" \
 - Admin routes: `POST /admin/v1/projects`, `POST|GET /admin/v1/keys`, `DELETE /admin/v1/keys/{id}`, `GET /admin/v1/usage?project_id=&from=&to=`, `GET /admin/v1/requests/{id}`, `GET /admin/v1/deployments`, `POST /admin/v1/deployments/{id}/enable`. An inference key never opens them.
 - Without `MINIROUTER_DATABASE_URL`, the single `MINIROUTER_API_KEY` mode works as before.
 
+### Prepaid credits
+
+Set `MINIROUTER_CREDITS=1` to make every project request run on prepaid credit:
+
+1. Before any provider is called, the request's **maximum** cost is held: input counted as one token per UTF-8 byte (an upper bound for byte-level tokenizers), plus the full `max_completion_tokens`, at the dearest deployment it may use. A model without a verified price is refused; too little credit answers `402`.
+2. After the call the actual cost is charged and the rest released, exactly once. A failed call is released. A stream cut mid-answer keeps its hold for review: unknown cost is not zero.
+3. Every charge is a balanced double-entry journal transaction; history is never edited.
+4. An `Idempotency-Key` header makes a retried request answer `409` instead of running (and charging) twice.
+5. Run `go run ./cmd/worker` beside the gateway: it resolves holds left behind by a crash.
+
+```bash
+curl -s -X POST localhost:8080/admin/v1/credits -H "$A" -d '{"project_id":"<id>","amount_usd":"10.00","reference":"grant-001"}'
+curl -s "localhost:8080/admin/v1/balance?project_id=<id>" -H "$A"
+curl -s "localhost:8080/admin/v1/ledger?project_id=<id>" -H "$A"
+```
+
+Credits are granted by an operator; accepting card payments (verified webhooks) is not built.
+
+## Operations
+
+- `GET /healthz`: the process is alive.
+- `GET /readyz`: this instance can serve traffic. 503 when the database (in PostgreSQL mode) does not answer or every deployment is benched or behind an open breaker. The body counts available deployments and never shows errors or secrets.
+- Every response carries `X-Request-ID` (a caller's plain value is kept, otherwise one is generated), and each request logs one line: method, path, status, duration. Never prompts, outputs or keys. `MINIROUTER_LOG_FORMAT=json` switches logs to JSON.
+- Streams that go quiet for 15 s (a model thinking) get `: keep-alive` comment lines, so proxies do not close them; OpenAI clients ignore these lines.
+
 ## Development commands
 
 Run these from the repository root. The Go toolchain is the build system; there is no Makefile.
@@ -182,8 +207,10 @@ Before committing, `gofmt -l cmd internal` should print nothing and `go vet ./..
 | Images / audio | ☐ future |
 | Catalog: models vs deployments, JSON config, OpenAI-compatible hosts | ✅ |
 | PostgreSQL: projects, hashed per-project keys, per-key limits, durable request records, admin API | ✅ |
-| Credit ledger / balances / holds | ☐ future |
+| Prepaid credits: durable holds, exactly-once settlement, double-entry journal, idempotency keys, recovery worker | ✅ |
 | Credit reservation/settlement/reconciliation | ☐ future |
+| Readiness probe, request IDs, structured logs, SSE keep-alive | ✅ |
+| Metrics, dashboard, load tests | ☐ later |
 | MCP / x402 / agent payment | ☐ optional future |
 
 ## Internal structure
@@ -191,20 +218,21 @@ Before committing, `gofmt -l cmd internal` should print nothing and `go vet ./..
 ```text
 cmd/minirouter/main.go       configuration and server boot
 cmd/catalog-import/           draft catalog entries from LiteLLM prices
+cmd/worker/                   resolves credit holds left by crashes
 internal/api/                 HTTP handlers, strict input validation, SSE output
 internal/core/                shared request, message, tool, usage and price types
 internal/catalog/             models, deployments, aliases; JSON config and validation
 internal/provider/            upstream adapters and SSE parsing
 internal/router/              resolution, attempt planning, retries, stream preflight
 internal/limits/              per-key RPM, TPM and concurrency limits
-internal/store/               PostgreSQL: projects, keys, request records
+internal/store/               PostgreSQL: projects, keys, request records, credit ledger
 internal/health/              circuit breakers, auto-disable, concurrency limits, latency samples
 internal/billing/             microUSD cost calculation, demo usage journal
 examples/                     request JSON
 config/                      example catalog
 contracts/                   target OpenAPI (not wired in)
 db/migrations/               PostgreSQL schema, applied at startup
-db/design/                   ledger schema planned for credits (not applied)
+db/design/                   payment top-up schema, for when payments are integrated (not applied)
 ```
 
 Request path:

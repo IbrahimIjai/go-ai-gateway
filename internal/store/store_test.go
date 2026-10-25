@@ -133,3 +133,5 @@ func TestRequestRecordsAndUsage(t *testing.T) {
 		t.Fatal("missing request reports not found")
 	}
 }
+
+var coreUsage = core.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}

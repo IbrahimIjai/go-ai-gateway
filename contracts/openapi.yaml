@@ -1,34 +1,74 @@
 openapi: 3.1.0
 info:
-  title: MiniRouter target API (design contract)
-  version: 1.0.0-design
+  title: MiniRouter API
+  version: 1.0.0
   description: >-
-    Planned v1 surface; NOT a statement that the included Go starter implements
-    all paths or tool calling. The starter currently implements text-only
-    /v1/chat/completions, /v1/models, /v1/usage and /healthz.
+    OpenAI-compatible LLM gateway. `/v1/*` routes take an inference key:
+    the single `MINIROUTER_API_KEY`, or a per-project key in PostgreSQL mode.
+    `/admin/v1/*` routes exist only in PostgreSQL mode and take the separate
+    `MINIROUTER_ADMIN_KEY`; neither key opens the other's routes.
+
+    Every response carries `X-Request-ID`. Chat responses also carry
+    `X-MiniRouter-*` routing headers. Errors share one shape (`Error`), and
+    unknown request fields are rejected with 400, never ignored.
+  license:
+    name: MIT
 servers:
   - url: http://127.0.0.1:8080
 security:
-  - bearerAuth: []
+  - inferenceKey: []
+
+tags:
+  - name: Health
+  - name: Inference
+  - name: Admin
+    description: PostgreSQL mode only.
+
 paths:
   /healthz:
     get:
-      security: []
+      tags: [Health]
       summary: Liveness
-      responses:
-        '200': {description: Alive}
-  /readyz:
-    get:
-      summary: Readiness (planned)
-      responses:
-        '200': {description: Ready}
-        '503': {description: Dependencies unhealthy}
-  /v1/models:
-    get:
-      summary: Public model registry
+      security: []
       responses:
         '200':
-          description: Models and capabilities
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, const: ok}
+
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Readiness
+      description: >-
+        Whether this instance can serve traffic. Never includes error text or
+        secrets.
+      security: []
+      responses:
+        '200':
+          description: Ready.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Readiness'}
+        '503':
+          description: >-
+            The database does not answer (PostgreSQL mode), or every deployment
+            is benched or behind an open circuit breaker.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Readiness'}
+
+  /v1/models:
+    get:
+      tags: [Inference]
+      summary: Models and aliases in the catalog
+      responses:
+        '200':
+          description: Every model with its deployments and prices, then every alias.
           content:
             application/json:
               schema:
@@ -39,87 +79,817 @@ paths:
                   data:
                     type: array
                     items:
-                      type: object
-                      required: [id, object]
-                      properties:
-                        id: {type: string}
-                        object: {type: string, const: model}
-                        owned_by: {type: string}
+                      oneOf:
+                        - $ref: '#/components/schemas/ModelEntry'
+                        - $ref: '#/components/schemas/AliasEntry'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
   /v1/chat/completions:
     post:
-      summary: Compatible chat completion (text/tools target; text only currently)
+      tags: [Inference]
+      summary: Chat completion, plain or streamed
+      description: >-
+        An OpenAI Chat Completions subset: text, tool calling and JSON output.
+        `model` is a model ID or an alias such as `router/auto`. A model that
+        cannot honor the request (tools, JSON output, context size) is never
+        tried. With `stream: true` the answer is Server-Sent Events; a stream
+        ends with `data: [DONE]` only when the provider finished, and silent
+        stretches carry `: keep-alive` comment lines.
       parameters:
         - in: header
           name: Idempotency-Key
           required: false
-          schema: {type: string, maxLength: 128}
-          description: Planned v1; not supported by scaffold
+          schema: {type: string, maxLength: 255}
+          description: >-
+            With prepaid credits on, a reused key answers 409 instead of
+            running (and charging) the request again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ChatRequest'}
+      responses:
+        '200':
+          description: The completion, or an SSE stream of chunks when `stream` is true.
+          headers:
+            X-MiniRouter-Resolved-Model: {$ref: '#/components/headers/ResolvedModel'}
+            X-MiniRouter-Deployment: {$ref: '#/components/headers/Deployment'}
+            X-MiniRouter-Provider: {$ref: '#/components/headers/Provider'}
+            X-MiniRouter-Attempts: {$ref: '#/components/headers/Attempts'}
+            X-MiniRouter-Route-Reason: {$ref: '#/components/headers/RouteReason'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChatCompletion'}
+            text/event-stream:
+              schema:
+                type: string
+                description: >-
+                  `data: <ChatCompletionChunk JSON>` events, then `data: [DONE]`.
+                  An interrupted stream ends with
+                  `data: {"error": {"type": "upstream_error", ...}}` and no `[DONE]`.
+        '400':
+          description: >-
+            `invalid_request_error` (bad or unsupported input, or a feature
+            this model's provider cannot honor), `no_eligible_model` (no model
+            can serve it; the message says why each was excluded), or
+            `unpriced_model` (credits on, but a deployment has no verified price).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '402':
+          description: '`insufficient_credit`: the balance cannot cover this request''s maximum cost.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '403':
+          description: '`model_not_allowed`: this key may not use the requested model.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '404':
+          description: '`model_not_found`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '409':
+          description: '`idempotency_conflict`: the Idempotency-Key was already used.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429':
+          description: '`rate_limit_exceeded`: a per-key RPM, TPM or concurrency limit.'
+          headers:
+            Retry-After:
+              schema: {type: integer}
+              description: Seconds until the request may succeed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '502':
+          description: '`upstream_error`: every eligible provider failed. The routing headers explain the attempts.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503':
+          description: >-
+            `upstream_unavailable` (every deployment refused admission: breaker
+            open, at capacity or benched) or `storage_unavailable` (credits on,
+            database unreachable).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '504':
+          description: '`upstream_timeout`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
+  /v1/route/explain:
+    post:
+      tags: [Inference]
+      summary: How a chat request would be routed, without calling any provider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ChatRequest'}
+      responses:
+        '200':
+          description: The routing decision a real request would start from.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  decision: {$ref: '#/components/schemas/RouteDecision'}
+                  plan:
+                    type: array
+                    items: {type: string}
+                    description: Deployment IDs in the order they would be tried.
+        '400':
+          description: '`invalid_request_error` or `no_eligible_model`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404':
+          description: '`model_not_found`.'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
+  /v1/usage:
+    get:
+      tags: [Inference]
+      summary: In-memory usage journal of this process
+      description: Lost on restart. In PostgreSQL mode use `/admin/v1/usage`.
+      responses:
+        '200':
+          description: Totals and the 25 most recent requests.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests: {type: integer}
+                  priced_requests: {type: integer}
+                  unpriced_requests: {type: integer, description: Usage known but no price; cost unknown, not zero.}
+                  known_total_usd: {type: string, examples: ['0.060000']}
+                  recent:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        model: {type: string}
+                        provider: {type: string}
+                        deployment: {type: string}
+                        status: {type: string, enum: [ok, usage_unavailable]}
+                        usage: {$ref: '#/components/schemas/JournalUsage'}
+                        cost_usd: {type: string}
+                        route: {$ref: '#/components/schemas/RouteDecision'}
+                        time: {type: string, format: date-time}
+                  note: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /admin/v1/projects:
+    post:
+      tags: [Admin]
+      summary: Create a project (and its organization, if new)
+      security: [{adminKey: []}]
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [model, messages]
+              additionalProperties: false
+              required: [organization, name]
               properties:
-                model: {type: string}
-                stream: {type: boolean, default: false}
-                max_completion_tokens: {type: integer, minimum: 1}
-                temperature: {type: number, minimum: 0, maximum: 2}
-                messages:
-                  type: array
-                  minItems: 1
-                  items:
-                    type: object
-                    required: [role, content]
-                    properties:
-                      role: {type: string}
-                      content:
-                        description: Target supports text and typed content parts; scaffold accepts text string only.
-                        oneOf:
-                          - type: string
-                          - type: array
-                            items: {type: object}
-                tools:
-                  type: array
-                  items: {type: object}
-                  description: Planned v1
+                organization: {type: string}
+                name: {type: string}
       responses:
-        '200':
-          description: JSON completion or text/event-stream when stream=true
+        '201':
+          description: Created.
           content:
             application/json:
-              schema: {type: object}
-            text/event-stream:
-              schema: {type: string}
-        '400': {description: Invalid request}
-        '401': {description: Invalid key}
-        '402': {description: Insufficient funds (planned)}
-        '429': {description: Rate limit exceeded (planned)}
-        '502': {description: Upstream provider error}
-        '504': {description: Upstream provider timed out}
-  /admin/v1/billing/balance:
-    get:
-      summary: Customer available/reserved balance (planned admin auth)
+              schema: {$ref: '#/components/schemas/Project'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/AdminUnauthorized'}
+
+  /admin/v1/keys:
+    post:
+      tags: [Admin]
+      summary: Issue an API key
+      description: The secret is returned once; only a prefix and an HMAC digest are stored.
+      security: [{adminKey: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [project_id, name]
+              properties:
+                project_id: {type: string, format: uuid}
+                name: {type: string}
+                models:
+                  type: array
+                  items: {type: string}
+                  description: Allowed model or alias IDs; empty means any.
+                expires_at: {type: string, format: date-time}
+                rpm: {type: integer, minimum: 0, description: Requests per minute; 0 means unlimited.}
+                tpm: {type: integer, minimum: 0, description: Estimated tokens per minute; 0 means unlimited.}
+                concurrency: {type: integer, minimum: 0, description: Requests in flight; 0 means unlimited.}
       responses:
-        '200':
-          description: Balance in microUSD
+        '201':
+          description: Issued.
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  currency: {type: string, const: USD}
-                  balance_micros: {type: integer}
-                  reserved_micros: {type: integer}
-                  available_micros: {type: integer}
+                  key: {$ref: '#/components/schemas/Key'}
+                  secret: {type: string, examples: ['mr_abcd1234_...'], description: Shown only now.}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/AdminUnauthorized'}
+    get:
+      tags: [Admin]
+      summary: List a project's keys (never their secrets)
+      security: [{adminKey: []}]
+      parameters:
+        - {in: query, name: project_id, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Keys, oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/Key'}
+        '401': {$ref: '#/components/responses/AdminUnauthorized'}
+
+  /admin/v1/keys/{id}:
+    delete:
+      tags: [Admin]
+      summary: Revoke a key
+      security: [{adminKey: []}]
+      parameters:
+        - {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Revoked.}
+        '401': {$ref: '#/components/responses/AdminUnauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
   /admin/v1/usage:
     get:
-      summary: Query project usage and spend (planned admin auth)
+      tags: [Admin]
+      summary: A project's usage per model in a period
+      security: [{adminKey: []}]
+      parameters:
+        - {in: query, name: project_id, required: true, schema: {type: string, format: uuid}}
+        - {in: query, name: from, schema: {type: string, format: date-time}, description: 'Default: 30 days ago.'}
+        - {in: query, name: to, schema: {type: string, format: date-time}, description: 'Default: now.'}
       responses:
-        '200': {description: Usage page}
+        '200':
+          description: One row per model.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from: {type: string, format: date-time}
+                  to: {type: string, format: date-time}
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/UsageRow'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/AdminUnauthorized'}
+
+  /admin/v1/requests/{id}:
+    get:
+      tags: [Admin]
+      summary: One request's durable record
+      description: Who, which model and deployment, how routing went, usage and cost. Never the prompt or output.
+      security: [{adminKey: []}]
+      parameters:
+        - {in: path, name: id, required: true, schema: {type: string}, description: The `id` of a chat completion.}
+      responses:
+        '200':
+          description: The record.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RequestRecord'}
+        '401': {$ref: '#/components/responses/AdminUnauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /admin/v1/credits:
+    post:
+      tags: [Admin]
+      summary: Grant prepaid credit
+      description: >-
+        Operator grants only; card payments are not built. The reference makes
+        a retried grant credit once.
+      security: [{adminKey: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [project_id, amount_usd, reference]
+              properties:
+                project_id: {type: string, format: uuid}
+                amount_usd: {type: string, examples: ['10.00'], description: Exact decimal, at most 6 places.}
+                reference: {type: string, description: Unique per grant.}
+      responses:
+        '200':
+          description: The balance after the grant.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BalanceResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/AdminUnauthorized'}
+
+  /admin/v1/balance:
+    get:
+      tags: [Admin]
+      summary: A project's credit balance
+      security: [{adminKey: []}]
+      parameters:
+        - {in: query, name: project_id, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Balance, active holds and what is available.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BalanceResponse'}
+        '401': {$ref: '#/components/responses/AdminUnauthorized'}
+
+  /admin/v1/ledger:
+    get:
+      tags: [Admin]
+      summary: A project's credit statement (latest 200 entries)
+      security: [{adminKey: []}]
+      parameters:
+        - {in: query, name: project_id, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Entries, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/LedgerEntry'}
+        '401': {$ref: '#/components/responses/AdminUnauthorized'}
+
+  /admin/v1/deployments:
+    get:
+      tags: [Admin]
+      summary: Health of every deployment
+      security: [{adminKey: []}]
+      responses:
+        '200':
+          description: Deployment ID → health.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: {$ref: '#/components/schemas/DeploymentHealth'}
+        '401': {$ref: '#/components/responses/AdminUnauthorized'}
+
+  /admin/v1/deployments/{id}/enable:
+    post:
+      tags: [Admin]
+      summary: Lift a deployment's bench and reset its circuit breaker
+      security: [{adminKey: []}]
+      parameters:
+        - {in: path, name: id, required: true, schema: {type: string}}
+      responses:
+        '204': {description: Enabled.}
+        '401': {$ref: '#/components/responses/AdminUnauthorized'}
+
 components:
   securitySchemes:
-    bearerAuth:
+    inferenceKey:
       type: http
       scheme: bearer
+      description: '`MINIROUTER_API_KEY`, or a per-project key (`mr_…`) in PostgreSQL mode.'
+    adminKey:
+      type: http
+      scheme: bearer
+      description: '`MINIROUTER_ADMIN_KEY`.'
+
+  headers:
+    ResolvedModel:
+      schema: {type: string}
+      description: The model that answered (an alias resolves to one of its models).
+    Deployment:
+      schema: {type: string}
+      description: The deployment that answered.
+    Provider:
+      schema: {type: string}
+      description: The provider of that deployment.
+    Attempts:
+      schema: {type: integer}
+      description: Upstream attempts made, retries and failovers included.
+    RouteReason:
+      schema: {type: string}
+      description: Comma-separated reason codes, e.g. `alias:auto,ranked_auto,failover_rate_limit:a@x`.
+
+  responses:
+    Unauthorized:
+      description: '`invalid_api_key`.'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    AdminUnauthorized:
+      description: '`invalid_admin_key`.'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    BadRequest:
+      description: '`invalid_request_error`.'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: '`not_found`.'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [type, message]
+          properties:
+            type:
+              type: string
+              enum: [invalid_request_error, no_eligible_model, unpriced_model, invalid_api_key, invalid_admin_key,
+                     insufficient_credit, model_not_allowed, model_not_found, not_found, idempotency_conflict,
+                     rate_limit_exceeded, upstream_error, upstream_unavailable, upstream_timeout,
+                     storage_unavailable, internal_error]
+            message: {type: string, description: Written by MiniRouter; never upstream body text.}
+
+    ChatRequest:
+      type: object
+      additionalProperties: false
+      required: [model, messages]
+      properties:
+        model: {type: string, examples: [router/auto, openai/gpt-4.1-mini]}
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: {$ref: '#/components/schemas/Message'}
+          description: At least one user message.
+        tools:
+          type: array
+          maxItems: 128
+          items: {$ref: '#/components/schemas/Tool'}
+        tool_choice:
+          description: Requires `tools`.
+          oneOf:
+            - type: string
+              enum: [auto, none, required]
+            - type: object
+              additionalProperties: false
+              required: [type, function]
+              properties:
+                type: {type: string, const: function}
+                function:
+                  type: object
+                  additionalProperties: false
+                  required: [name]
+                  properties:
+                    name: {type: string}
+        parallel_tool_calls: {type: boolean, description: Requires `tools`.}
+        response_format:
+          type: object
+          additionalProperties: false
+          required: [type]
+          properties:
+            type: {type: string, enum: [text, json_object, json_schema]}
+            json_schema:
+              type: object
+              additionalProperties: false
+              required: [name, schema]
+              properties:
+                name: {type: string, pattern: '^[a-zA-Z0-9_-]{1,64}$'}
+                description: {type: string}
+                schema: {type: object}
+                strict: {type: boolean}
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              maxItems: 4
+              items: {type: string, minLength: 1}
+        stream: {type: boolean, default: false}
+        stream_options:
+          type: object
+          additionalProperties: false
+          description: 'Requires `stream: true`.'
+          properties:
+            include_usage: {type: boolean}
+        temperature: {type: number, minimum: 0, maximum: 2}
+        max_completion_tokens: {type: integer, minimum: 1, maximum: 8192, default: 512}
+        max_tokens:
+          type: integer
+          minimum: 1
+          maximum: 8192
+          description: Older name for `max_completion_tokens`; send only one.
+
+    Message:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role: {type: string, enum: [system, developer, user, assistant, tool]}
+        content:
+          description: >-
+            Required except on an assistant message that has `tool_calls`.
+            Images are not supported yet and are rejected.
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [type, text]
+                properties:
+                  type: {type: string, const: text}
+                  text: {type: string}
+            - type: 'null'
+        tool_calls:
+          type: array
+          description: Assistant messages only.
+          items: {$ref: '#/components/schemas/ToolCall'}
+        tool_call_id:
+          type: string
+          description: Tool messages only; must answer an earlier tool call.
+
+    Tool:
+      type: object
+      additionalProperties: false
+      required: [type, function]
+      properties:
+        type: {type: string, const: function}
+        function:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name: {type: string, pattern: '^[a-zA-Z0-9_-]{1,64}$'}
+            description: {type: string}
+            parameters: {type: object, description: A JSON Schema object.}
+            strict: {type: boolean, description: Only OpenAI deployments can honor this; others refuse.}
+
+    ToolCall:
+      type: object
+      required: [id, type, function]
+      properties:
+        id: {type: string}
+        type: {type: string, const: function}
+        function:
+          type: object
+          required: [name, arguments]
+          properties:
+            name: {type: string}
+            arguments: {type: string, description: JSON text, passed through byte for byte.}
+
+    ChatCompletion:
+      type: object
+      properties:
+        id: {type: string, examples: [chatcmpl-mini-0123456789abcdef01234567]}
+        object: {type: string, const: chat.completion}
+        created: {type: integer}
+        model: {type: string, description: The resolved model.}
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index: {type: integer}
+              message:
+                type: object
+                properties:
+                  role: {type: string, const: assistant}
+                  content: {type: ['string', 'null'], description: Null when the answer is only tool calls.}
+                  refusal: {type: string}
+                  tool_calls:
+                    type: array
+                    items: {$ref: '#/components/schemas/ToolCall'}
+              finish_reason: {type: string, enum: [stop, length, tool_calls, content_filter]}
+        usage: {$ref: '#/components/schemas/Usage'}
+
+    Usage:
+      type: ['object', 'null']
+      description: Null when the provider reported none; unknown, never zero.
+      properties:
+        prompt_tokens: {type: integer}
+        completion_tokens: {type: integer}
+        total_tokens: {type: integer}
+        prompt_tokens_details:
+          type: object
+          properties:
+            cached_tokens: {type: integer}
+            cache_write_tokens: {type: integer, description: Present only when non-zero.}
+        completion_tokens_details:
+          type: object
+          properties:
+            reasoning_tokens: {type: integer}
+
+    JournalUsage:
+      type: object
+      properties:
+        prompt_tokens: {type: integer}
+        completion_tokens: {type: integer}
+        total_tokens: {type: integer}
+        cached_input_tokens: {type: integer}
+        cache_write_tokens: {type: integer}
+        reasoning_tokens: {type: integer}
+
+    RouteDecision:
+      type: object
+      description: How a request was routed. Never contains prompt text.
+      properties:
+        requested: {type: string}
+        policy: {type: string, examples: [exact, 'alias:auto']}
+        model: {type: string}
+        deployment: {type: string}
+        attempts:
+          type: array
+          items:
+            type: object
+            properties:
+              deployment: {type: string}
+              class: {type: string, description: Failure class; absent on success.}
+              status: {type: integer, description: Upstream HTTP status, when known.}
+              ms: {type: integer}
+        scores:
+          type: array
+          description: Alias policy ranking, best first.
+          items:
+            type: object
+            properties:
+              model: {type: string}
+              total: {type: number}
+              quality: {type: number}
+              cost: {type: number}
+              speed: {type: number}
+              reliability: {type: number}
+        reasons: {type: array, items: {type: string}}
+
+    ModelEntry:
+      type: object
+      properties:
+        id: {type: string}
+        object: {type: string, const: model}
+        owned_by: {type: string, const: minirouter}
+        capabilities:
+          type: object
+          properties:
+            tools: {type: boolean}
+            structured_output: {type: boolean}
+        context_length: {type: ['integer', 'null']}
+        max_output_tokens: {type: ['integer', 'null']}
+        deployments:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              provider: {type: string}
+              pricing:
+                type: ['object', 'null']
+                description: Null when unknown. Unverified prices are shown, never billed.
+                properties:
+                  unit: {type: string, const: usd_per_million_tokens}
+                  input: {type: string}
+                  output: {type: string}
+                  cache_read: {type: string}
+                  cache_write: {type: string}
+                  verified: {type: boolean}
+                  source_url: {type: string}
+
+    AliasEntry:
+      type: object
+      properties:
+        id: {type: string, examples: [router/auto]}
+        object: {type: string, const: model}
+        owned_by: {type: string, const: minirouter}
+        policy: {type: string, enum: [ordered, eco, fast, auto]}
+        models: {type: array, items: {type: string}}
+
+    Readiness:
+      type: object
+      properties:
+        ready: {type: boolean}
+        database: {type: string, enum: [ok, unavailable], description: Present in PostgreSQL mode.}
+        deployments_total: {type: integer}
+        deployments_available: {type: integer}
+
+    Project:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        organization: {type: string}
+        name: {type: string}
+
+    Key:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        project_id: {type: string, format: uuid}
+        name: {type: string}
+        prefix: {type: string, examples: [mr_abcd1234]}
+        models: {type: array, items: {type: string}}
+        limits:
+          type: object
+          properties:
+            RPM: {type: integer}
+            TPM: {type: integer}
+            Concurrency: {type: integer}
+        expires_at: {type: string, format: date-time}
+        revoked_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+
+    UsageRow:
+      type: object
+      properties:
+        model: {type: string}
+        requests: {type: integer}
+        failed: {type: integer}
+        input_tokens: {type: integer}
+        output_tokens: {type: integer}
+        known_cost_micros: {type: integer}
+        unpriced_requests: {type: integer, description: Cost unknown, not zero.}
+
+    RequestRecord:
+      type: object
+      properties:
+        id: {type: string}
+        project_id: {type: string}
+        api_key_id: {type: string}
+        requested_model: {type: string}
+        resolved_model: {type: string}
+        deployment_id: {type: string}
+        status: {type: string, enum: [ok, usage_unavailable, failed]}
+        error_class: {type: string}
+        stream: {type: boolean}
+        route: {$ref: '#/components/schemas/RouteDecision'}
+        usage: {$ref: '#/components/schemas/JournalUsage'}
+        cost_micros: {type: integer, description: Absent when unpriced or unknown.}
+        created_at: {type: string, format: date-time}
+
+    BalanceResponse:
+      type: object
+      properties:
+        project_id: {type: string, format: uuid}
+        currency: {type: string, const: USD}
+        balance:
+          type: object
+          properties:
+            balance_micros: {type: integer}
+            reserved_micros: {type: integer, description: Held by requests in flight or under review.}
+            available_micros: {type: integer}
+        available_usd: {type: string, examples: ['9.940000']}
+
+    LedgerEntry:
+      type: object
+      properties:
+        kind: {type: string, enum: [credit_grant, inference_settle, refund, manual_adjustment]}
+        inference_request_id: {type: string}
+        reference: {type: string}
+        amount_micros: {type: integer, description: Positive adds credit; negative spends it.}
+        at: {type: string, format: date-time}
+
+    DeploymentHealth:
+      type: object
+      properties:
+        breaker: {type: string, enum: [closed, open, half_open]}
+        disabled_until: {type: string, format: date-time}
+        disabled_for: {type: string, enum: [quota, credential, model_gone]}
+        in_flight: {type: integer}
+        latency_samples: {type: array, items: {type: integer}, description: Nanoseconds.}
+        ttft_samples: {type: array, items: {type: integer}, description: Nanoseconds.}
+        ok_this_minute: {type: integer}
+        failures_this_minute: {type: integer}

@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -29,7 +30,12 @@ type Server struct {
 	Keys    Keys
 	Records Recorder
 	Limiter *limits.Limiter
-	Admin   *Admin // nil: no admin API
+	Credits Credits                     // nil: no prepaid credit enforcement
+	Admin   *Admin                      // nil: no admin API
+	Ping    func(context.Context) error // database check for /readyz; nil without one
+	// KeepAlive is how long a stream may stay silent before a comment line
+	// keeps proxies from closing it; zero means 15 s.
+	KeepAlive time.Duration
 }
 
 func (s *Server) Handler() http.Handler {
@@ -37,6 +43,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /v1/models", s.auth(s.models))
 	mux.HandleFunc("GET /v1/usage", s.auth(s.usage))
 	mux.HandleFunc("POST /v1/chat/completions", s.auth(s.chat))
@@ -44,7 +51,7 @@ func (s *Server) Handler() http.Handler {
 	if s.Admin != nil && s.Admin.Key != "" {
 		s.Admin.mount(mux, s)
 	}
-	return mux
+	return s.traced(mux)
 }
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	snap := s.Router.Catalog.Load()
@@ -137,15 +144,20 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := newID()
+	held, ok := s.reserve(w, r, req, id)
+	if !ok {
+		settle(grant, nil)
+		return
+	}
 	now := time.Now().Unix()
 	if req.Stream {
-		s.stream(w, r, req, id, now, grant)
+		s.stream(w, r, req, id, now, grant, held)
 		return
 	}
 	c, out, route, err := s.Router.Complete(r.Context(), req)
 	routeHeaders(w, c, route)
 	settle(grant, out.Usage)
-	s.finish(r, id, req, c, route, out.Usage, false, err)
+	s.finish(r, id, req, c, route, out.Usage, false, err, held)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -156,12 +168,12 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		"usage":   wireUsage(out.Usage),
 	})
 }
-func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatRequest, id string, now int64, grant *limits.Grant) {
+func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatRequest, id string, now int64, grant *limits.Grant, held bool) {
 	c, stream, route, err := s.Router.Stream(r.Context(), req)
 	routeHeaders(w, c, route)
 	if err != nil {
 		settle(grant, nil)
-		s.finish(r, id, req, c, route, nil, false, err)
+		s.finish(r, id, req, c, route, nil, false, err, held)
 		s.fail(w, err)
 		return
 	}
@@ -170,6 +182,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatReq
 	defer func() {
 		if !settled {
 			settle(grant, nil) // every early return still frees the key's slot
+			if held {
+				s.settleCredits(r, id, c, nil, true, nil) // and keeps the hold for review
+			}
 		}
 	}()
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -197,8 +212,46 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatReq
 	var usage *core.Usage
 	var finish string
 	failed := false
+	// Upstream reads run apart so a quiet upstream (a model thinking) can be
+	// covered with SSE comments: proxies drop connections idle for ~60 s,
+	// and OpenAI clients ignore comment lines.
+	type received struct {
+		chunk core.Chunk
+		err   error
+	}
+	results, done := make(chan received), make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			chunk, err := stream.Recv()
+			select {
+			case results <- received{chunk, err}:
+			case <-done:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	idle := time.NewTimer(s.keepAlive())
+	defer idle.Stop()
+loop:
 	for {
-		chunk, err := stream.Recv()
+		var chunk core.Chunk
+		var err error
+		select {
+		case got := <-results:
+			chunk, err = got.chunk, got.err
+		case <-idle.C:
+			if _, err := io.WriteString(w, ": keep-alive\n\n"); err != nil {
+				failed = true // the client is gone
+				break loop
+			}
+			f.Flush()
+			idle.Reset(s.keepAlive())
+			continue
+		}
 		if err == io.EOF {
 			break
 		}
@@ -224,11 +277,12 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, req core.ChatReq
 				failed = true
 				break
 			}
+			idle.Reset(s.keepAlive())
 		}
 	}
 	settle(grant, usage)
 	settled = true
-	s.finish(r, id, req, c, route, usage, failed, nil)
+	s.finish(r, id, req, c, route, usage, failed, nil, held)
 	if failed {
 		return
 	}
@@ -319,4 +373,11 @@ func jsonOut(w http.ResponseWriter, status int, v any) {
 }
 func jsonError(w http.ResponseWriter, status int, kind, message string) {
 	jsonOut(w, status, map[string]any{"error": map[string]string{"type": kind, "message": message}})
+}
+
+func (s *Server) keepAlive() time.Duration {
+	if s.KeepAlive > 0 {
+		return s.KeepAlive
+	}
+	return 15 * time.Second
 }

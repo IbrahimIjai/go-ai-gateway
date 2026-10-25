@@ -1,7 +1,6 @@
 # Design-only schema
 
-These files describe the credit ledger (holds, settlement, reconciliation) and
-identity/top-up tables planned for Phase 6. They are **not applied**: the
-migrator only reads `db/migrations/`. They will be adapted to the Phase 5
-schema (text deployment IDs from the catalog file, `inference_requests.id`
-as text) when Phase 6 begins.
+`003_identity_and_topups.up.sql` sketches users, memberships and payment
+top-ups with webhook de-duplication. It is **not applied**: the migrator only
+reads `db/migrations/`. It becomes a migration when a real payment provider is
+integrated; until then credits are granted through the admin API.

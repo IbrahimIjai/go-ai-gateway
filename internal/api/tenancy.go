@@ -99,7 +99,10 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, req core.ChatRequ
 // finish journals a request in memory and, when configured, durably. A cut
 // stream or missing usage is recorded as unavailable, never as zero; a
 // failure is recorded with its class.
-func (s *Server) finish(r *http.Request, id string, req core.ChatRequest, c router.Candidate, route core.RouteDecision, usage *core.Usage, failed bool, err error) {
+func (s *Server) finish(r *http.Request, id string, req core.ChatRequest, c router.Candidate, route core.RouteDecision, usage *core.Usage, failed bool, err error, held bool) {
+	if held {
+		defer s.settleCredits(r, id, c, usage, failed, err) // after the record, which the worker reads
+	}
 	rec := store.Record{ID: id, Requested: req.Model, Resolved: c.Model.ID, Deployment: c.Deployment.ID, Stream: req.Stream, Route: route, Status: "ok", Usage: usage}
 	switch {
 	case err != nil:

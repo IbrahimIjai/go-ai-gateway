@@ -102,6 +102,14 @@ func (f *fakeAdmin) Request(context.Context, string) (store.Record, error) {
 	return store.Record{}, store.ErrNotFound
 }
 
+func (f *fakeAdmin) Grant(context.Context, string, int64, string) error { return nil }
+func (f *fakeAdmin) Balance(context.Context, string) (store.Balance, error) {
+	return store.Balance{BalanceMicros: 10_000_000, AvailableMicros: 10_000_000}, nil
+}
+func (f *fakeAdmin) Ledger(context.Context, string, int) ([]store.LedgerEntry, error) {
+	return nil, nil
+}
+
 func TestAdminAPI(t *testing.T) {
 	s, _ := tenantServer()
 	fa := &fakeAdmin{}

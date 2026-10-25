@@ -317,3 +317,6 @@ func (s *Store) Usage(ctx context.Context, projectID string, from, to time.Time)
 		return u, err
 	})
 }
+
+// Ping reports whether the database answers, for readiness checks.
+func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
